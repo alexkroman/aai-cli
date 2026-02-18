@@ -128,7 +128,6 @@ def main(cfg: DictConfig) -> None:
     # API keys from env vars
     console.print("  [heading]API Keys[/heading]")
     aai_key = get_env_key("ASSEMBLYAI_API_KEY")
-    ant_key = get_env_key("ANTHROPIC_API_KEY")
     hf_token = get_env_key("HF_TOKEN")
     console.print("  [success]All keys loaded from environment[/success]")
 
@@ -152,13 +151,13 @@ def main(cfg: DictConfig) -> None:
     result = run_optimization(
         eval_samples=eval_samples,
         api_key=aai_key,
-        anthropic_key=ant_key,
         starting_prompt=cfg.optimization.starting_prompt,
         num_threads=cfg.optimization.num_threads,
         iterations=cfg.optimization.iterations,
         console=console,
         candidates_per_step=cfg.optimization.candidates_per_step,
         trajectory_size=cfg.optimization.trajectory_size,
+        llm_model=cfg.optimization.llm_model,
         resume_history=resume_history,
         seed=cfg.optimization.seed,
     )

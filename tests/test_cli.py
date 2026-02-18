@@ -38,9 +38,9 @@ def test_default_config_loads():
         assert "earnings22" in cfg.datasets
         assert "peoples" in cfg.datasets
         assert "ami" in cfg.datasets
-        assert cfg.optimization.samples == 50
-        assert cfg.optimization.iterations == 5
-        assert cfg.optimization.num_threads == 24
+        assert cfg.optimization.samples == 100
+        assert cfg.optimization.iterations == 10
+        assert cfg.optimization.num_threads == 12
 
 
 def test_config_override():

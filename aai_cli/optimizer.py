@@ -5,8 +5,8 @@ import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
-import anthropic
 import jiwer
+from openai import OpenAI
 from rich.console import Console
 from tqdm import tqdm
 from whisper_normalizer.english import EnglishTextNormalizer
@@ -15,32 +15,6 @@ from .transcribe import transcribe_assemblyai
 
 _normalize = EnglishTextNormalizer()
 
-GRADIENT_PROMPT = """\
-You are a gradient engine for optimizing speech-to-text prompts. \
-Given a prompt and a transcription error, explain why the prompt \
-caused this specific error and what instruction change would fix it.
-
-## Prompt
-{prompt}
-
-## Error (WER: {wer:.2%})
-Reference:  {reference}
-Hypothesis: {hypothesis}
-
-In 1-2 sentences: Why did this prompt produce this error, and what \
-specific instruction would fix it? Be concrete and actionable."""
-
-AGGREGATE_GRADIENT_PROMPT = """\
-You are part of an optimization system that improves speech-to-text prompts. \
-Below are individual gradient feedback signals from {n} transcription errors. \
-Critically aggregate them into a single concise summary.
-
-{gradients}
-
-Summarize the core failure patterns and the most impactful instruction changes \
-in 2-4 sentences. Focus on what is most frequent and actionable. \
-Do NOT propose a new prompt — only summarize the feedback."""
-
 REFLECTION_PROMPT = """\
 You are an expert prompt engineer optimizing instructions for an \
 audio-only speech-to-text model (AssemblyAI universal-3-pro). The model \
@@ -48,7 +22,7 @@ receives ONLY audio — no images, no text, no documents. The prompt you \
 write is the ONLY text input the speech model sees before transcribing.
 
 ## Optimization Trajectory
-Previous prompts, WER scores, and gradient feedback (listed worst to best, \
+Previous prompts, WER scores, and their worst errors (listed worst to best, \
 lower WER is better). The last entry is the current best:
 
 {trajectory}
@@ -61,9 +35,8 @@ Below are the worst transcription errors. "Reference" is ground truth, \
 
 ## Your Task
 
-Using the gradient feedback and error samples above, GENERATE an improved \
-prompt that:
-- Directly addresses the most common failure modes identified in the gradients
+Using the error patterns above, GENERATE an improved prompt that:
+- Directly addresses the most common failure modes seen in the errors
 - Uses imperative instructions: "Transcribe…", "Preserve…", "Include…"
 - Does NOT repeat instructions that are already working well
 - Does NOT describe audio content or mention images/documents
@@ -118,8 +91,8 @@ def _mean_wer(results: list[dict]) -> float:
 
 
 def _worst_samples(results: list[dict], n: int = 10) -> list[dict]:
-    """Return the N worst samples by WER (excluding perfect scores)."""
-    errors = [r for r in results if r["wer"] > 0]
+    """Return the N worst samples by WER (excluding perfect, empty, and >= 100%)."""
+    errors = [r for r in results if 0 < r["wer"] < 1.0 and r["hypothesis"].strip()]
     ranked = sorted(errors, key=lambda r: r["wer"], reverse=True)
     return ranked[:n]
 
@@ -136,71 +109,6 @@ def _format_error_samples(samples: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def _compute_gradient(prompt: str, sample: dict, anthropic_key: str) -> str:
-    """Ask Haiku why the prompt caused this specific error and how to fix it."""
-    client = anthropic.Anthropic(api_key=anthropic_key)
-    message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=256,
-        temperature=0.0,
-        messages=[
-            {
-                "role": "user",
-                "content": GRADIENT_PROMPT.format(
-                    prompt=prompt,
-                    wer=sample["wer"],
-                    reference=sample["reference"],
-                    hypothesis=sample["hypothesis"],
-                ),
-            }
-        ],
-    )
-    return message.content[0].text.strip()
-
-
-def _aggregate_gradients(gradients: list[str], anthropic_key: str) -> str:
-    """Aggregate multiple per-error gradients into one concise summary."""
-    numbered = "\n".join(f"{i}. {g}" for i, g in enumerate(gradients, 1))
-    client = anthropic.Anthropic(api_key=anthropic_key)
-    message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=512,
-        temperature=0.0,
-        messages=[
-            {
-                "role": "user",
-                "content": AGGREGATE_GRADIENT_PROMPT.format(
-                    n=len(gradients),
-                    gradients=numbered,
-                ),
-            }
-        ],
-    )
-    return message.content[0].text.strip()
-
-
-def _compute_aggregated_gradient(
-    results: list[dict], prompt: str, anthropic_key: str, n: int = 5
-) -> str:
-    """Compute per-error gradients in parallel, then aggregate into one summary."""
-    errors = [r for r in results if r["wer"] > 0]
-    ranked = sorted(errors, key=lambda r: r["wer"], reverse=True)
-    worst = ranked[:n]
-
-    if not worst:
-        return ""
-
-    # Compute individual gradients in parallel
-    gradients: list[str] = []
-    with ThreadPoolExecutor(max_workers=n) as pool:
-        futures = [pool.submit(_compute_gradient, prompt, r, anthropic_key) for r in worst]
-        for future in as_completed(futures):
-            gradients.append(future.result())
-
-    # Aggregate into a single signal
-    return _aggregate_gradients(gradients, anthropic_key)
-
-
 def _format_trajectory(history: list[dict], max_size: int = 20) -> str:
     """Format top-K prompts by WER as ascending-quality trajectory (OPRO-style)."""
     sorted_history = sorted(history, key=lambda h: h["wer"])
@@ -210,18 +118,18 @@ def _format_trajectory(history: list[dict], max_size: int = 20) -> str:
     lines = []
     for h in top_k:
         entry = f'WER: {h["wer"]:.2%} — "{h["prompt"]}"'
-        gradient = h.get("gradient", "")
-        if gradient:
-            entry += f"\n  Gradient: {gradient}"
+        for s in h.get("worst_samples", []):
+            entry += f'\n  [{s["wer"]:.2%}] ref: "{s["reference"]}" → hyp: "{s["hypothesis"]}"'
         lines.append(entry)
     return "\n\n".join(lines)
 
 
 def _propose_prompt(
     history: list[dict],
-    anthropic_key: str,
+    aai_key: str,
     trajectory_size: int = 20,
     error_samples: str = "",
+    llm_model: str = "claude-sonnet-4-5-20250929",
 ) -> tuple[str, str]:
     """Return (candidate_prompt, full_reflection_prompt) tuple."""
     trajectory = _format_trajectory(history, max_size=trajectory_size)
@@ -231,27 +139,26 @@ def _propose_prompt(
         error_samples=error_samples,
     )
 
-    client = anthropic.Anthropic(api_key=anthropic_key)
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
+    client = OpenAI(
+        api_key=aai_key,
+        base_url="https://llm-gateway.assemblyai.com/v1",
+    )
+    response = client.chat.completions.create(
+        model=llm_model,
         max_tokens=16000,
-        temperature=1.0,
-        thinking={"type": "enabled", "budget_tokens": 10000},
         messages=[{"role": "user", "content": full_prompt}],
     )
-    # Extract the text block (skip thinking blocks)
-    for block in message.content:
-        if block.type == "text":
-            return block.text.strip(), full_prompt
-    return "", full_prompt
+    text = response.choices[0].message.content or ""
+    return text.strip(), full_prompt
 
 
 def _generate_candidates(
     history: list[dict],
-    anthropic_key: str,
+    aai_key: str,
     n_candidates: int,
     trajectory_size: int,
     error_samples: str = "",
+    llm_model: str = "claude-sonnet-4-5-20250929",
 ) -> list[tuple[str, str]]:
     """Generate N candidate prompts in parallel. Returns list of (candidate, full_prompt)."""
     results: list[tuple[str, str]] = []
@@ -260,9 +167,10 @@ def _generate_candidates(
             pool.submit(
                 _propose_prompt,
                 history,
-                anthropic_key,
+                aai_key,
                 trajectory_size,
                 error_samples,
+                llm_model,
             )
             for _ in range(n_candidates)
         ]
@@ -283,7 +191,6 @@ def _save_state(state: dict, path: str = "outputs/optimization_state.json") -> N
 def run_optimization(
     eval_samples: list[dict],
     api_key: str,
-    anthropic_key: str,
     starting_prompt: str,
     num_threads: int,
     iterations: int,
@@ -292,6 +199,7 @@ def run_optimization(
     trajectory_size: int = 20,
     resume_history: list[dict] | None = None,
     seed: int = 42,
+    llm_model: str = "claude-sonnet-4-5-20250929",
 ) -> dict:
     """Run OPRO optimization loop and return results dict."""
 
@@ -339,14 +247,11 @@ def run_optimization(
         )
         baseline_wer = _mean_wer(baseline_results)
         console.print(f"  Starting WER: [bold]{baseline_wer * 100:.2f}%[/bold]")
-        console.print("  [progress]Computing gradients...[/progress]")
         history.append(
             {
                 "prompt": starting_prompt,
                 "wer": baseline_wer,
-                "gradient": _compute_aggregated_gradient(
-                    baseline_results, starting_prompt, anthropic_key
-                ),
+                "worst_samples": _worst_samples(baseline_results, n=5),
             }
         )
         best_results = baseline_results
@@ -363,12 +268,9 @@ def run_optimization(
         )
         resume_wer = _mean_wer(best_results)
         console.print(f"  Baseline WER: [bold]{resume_wer * 100:.2f}%[/bold]")
-        console.print("  [progress]Computing gradients...[/progress]")
         # Update existing entry instead of appending a duplicate
         best_prev["wer"] = resume_wer
-        best_prev["gradient"] = _compute_aggregated_gradient(
-            best_results, best_prev["prompt"], anthropic_key
-        )
+        best_prev["worst_samples"] = _worst_samples(best_results, n=5)
         _save_state(_build_state(history))
 
     for i in range(1, iterations + 1):
@@ -387,10 +289,11 @@ def run_optimization(
         console.print(f"    Generating {candidates_per_step} candidates...")
         candidates = _generate_candidates(
             history,
-            anthropic_key,
+            api_key,
             candidates_per_step,
             trajectory_size,
             error_samples_text,
+            llm_model,
         )
 
         # Evaluate all candidates and add to trajectory
@@ -408,9 +311,7 @@ def run_optimization(
                 {
                     "prompt": candidate,
                     "wer": candidate_wer,
-                    "gradient": _compute_aggregated_gradient(
-                        candidate_results, candidate, anthropic_key
-                    ),
+                    "worst_samples": _worst_samples(candidate_results, n=5),
                 }
             )
             console.print(f"      WER: {candidate_wer * 100:.2f}%")
