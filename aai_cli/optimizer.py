@@ -35,7 +35,8 @@ Below are the worst transcription errors. "Reference" is ground truth, \
 
 ## Your Task
 
-Using the error patterns above, GENERATE an improved prompt that:
+Using the error patterns above, GENERATE a NEW prompt that is DIFFERENT from \
+all previous prompts in the trajectory and achieves a WER as low as possible:
 - Directly addresses the most common failure modes seen in the errors
 - Uses imperative instructions: "Transcribe…", "Preserve…", "Include…"
 - Does NOT repeat instructions that are already working well
@@ -44,8 +45,51 @@ Using the error patterns above, GENERATE an improved prompt that:
 conversations, presentations)
 - Is concise — avoid redundant or overlapping instructions
 
+{stagnation_warning}\
 Reply with ONLY the improved prompt text on its own line, no explanation \
 or commentary."""
+
+
+META_REFLECTION_PROMPT = """\
+You are a meta-optimizer improving the instruction template used by an ASR \
+prompt optimizer. The optimizer uses a "reflection prompt" to guide an LLM in \
+proposing better speech-to-text prompts for AssemblyAI universal-3-pro.
+
+## Current Reflection Prompt Template
+```
+{current_reflection_prompt}
+```
+
+## Recent Optimization Evidence
+
+### Prompts that IMPROVED WER (good — the reflection prompt guided these well):
+{improved_prompts}
+
+### Prompts that DID NOT improve WER (bad — the reflection prompt failed here):
+{failed_prompts}
+
+## Your Task
+
+Analyze the evidence above:
+- What patterns appear in successful prompts that the reflection prompt encouraged?
+- What patterns appear in failed prompts that the reflection prompt should have discouraged?
+- What instructions in the reflection prompt are ineffective or missing?
+
+Return an improved version of the reflection prompt template that better guides \
+the optimizer toward lower WER. You MUST preserve these exact placeholders in \
+your output: {{trajectory}}, {{error_samples}}, and {{stagnation_warning}}.
+
+Reply with ONLY the improved reflection prompt template, no explanation."""
+
+
+STAGNATION_WARNING = """\
+IMPORTANT: The optimization has shown NO improvement for {stale_iterations} \
+consecutive iterations. Minor edits are clearly insufficient. You MUST make \
+SIGNIFICANT structural changes to the prompt — try a completely different \
+approach, reorder instructions, remove ineffective clauses, or reframe the \
+task from scratch. Do not make small tweaks.
+
+"""
 
 
 def _compute_wer(reference: str, hypothesis: str) -> float:
@@ -130,13 +174,17 @@ def _propose_prompt(
     trajectory_size: int = 20,
     error_samples: str = "",
     llm_model: str = "claude-sonnet-4-5-20250929",
+    stagnation_warning: str = "",
+    reflection_prompt: str | None = None,
 ) -> tuple[str, str]:
     """Return (candidate_prompt, full_reflection_prompt) tuple."""
     trajectory = _format_trajectory(history, max_size=trajectory_size)
 
-    full_prompt = REFLECTION_PROMPT.format(
+    template = reflection_prompt if reflection_prompt is not None else REFLECTION_PROMPT
+    full_prompt = template.format(
         trajectory=trajectory,
         error_samples=error_samples,
+        stagnation_warning=stagnation_warning,
     )
 
     client = OpenAI(
@@ -157,26 +205,112 @@ def _generate_candidates(
     aai_key: str,
     n_candidates: int,
     trajectory_size: int,
-    error_samples: str = "",
+    worst_pool: list[dict],
     llm_model: str = "claude-sonnet-4-5-20250929",
+    error_sample_size: int = 10,
+    stagnation_warning: str = "",
+    reflection_prompt: str | None = None,
 ) -> list[tuple[str, str]]:
-    """Generate N candidate prompts in parallel. Returns list of (candidate, full_prompt)."""
+    """Generate N candidate prompts in parallel, each seeing a different random subset of errors."""
     results: list[tuple[str, str]] = []
     with ThreadPoolExecutor(max_workers=n_candidates) as pool:
-        futures = [
-            pool.submit(
-                _propose_prompt,
-                history,
-                aai_key,
-                trajectory_size,
-                error_samples,
-                llm_model,
+        futures = []
+        for _ in range(n_candidates):
+            subset = random.sample(worst_pool, min(error_sample_size, len(worst_pool)))
+            error_text = _format_error_samples(subset)
+            futures.append(
+                pool.submit(
+                    _propose_prompt,
+                    history,
+                    aai_key,
+                    trajectory_size,
+                    error_text,
+                    llm_model,
+                    stagnation_warning,
+                    reflection_prompt,
+                )
             )
-            for _ in range(n_candidates)
-        ]
         for future in as_completed(futures):
             results.append(future.result())
     return results
+
+
+def _refine_reflection_prompt(
+    current_reflection_prompt: str,
+    history: list[dict],
+    aai_key: str,
+    llm_model: str = "claude-sonnet-4-5-20250929",
+) -> str:
+    """Ask the LLM to propose an improved reflection prompt based on recent evidence."""
+    # Partition history into improved vs. failed based on whether each entry
+    # beat the WER of the entry before it (chronological order)
+    improved: list[str] = []
+    failed: list[str] = []
+    for idx in range(1, len(history)):
+        prev_best = min(h["wer"] for h in history[:idx])
+        entry = history[idx]
+        line = f'WER: {entry["wer"]:.2%} — "{entry["prompt"][:120]}"'
+        if entry["wer"] < prev_best:
+            improved.append(line)
+        else:
+            failed.append(line)
+
+    improved_text = "\n".join(improved[-10:]) if improved else "(none)"
+    failed_text = "\n".join(failed[-10:]) if failed else "(none)"
+
+    meta_prompt = META_REFLECTION_PROMPT.format(
+        current_reflection_prompt=current_reflection_prompt,
+        improved_prompts=improved_text,
+        failed_prompts=failed_text,
+    )
+
+    client = OpenAI(
+        api_key=aai_key,
+        base_url="https://llm-gateway.assemblyai.com/v1",
+    )
+    response = client.chat.completions.create(
+        model=llm_model,
+        max_tokens=16000,
+        messages=[{"role": "user", "content": meta_prompt}],
+    )
+    text = response.choices[0].message.content or ""
+    return text.strip()
+
+
+def _validate_reflection_prompt(
+    proposed_prompt: str,
+    history: list[dict],
+    eval_samples: list[dict],
+    api_key: str,
+    num_threads: int,
+    trajectory_size: int,
+    llm_model: str = "claude-sonnet-4-5-20250929",
+) -> float:
+    """Generate a small batch of candidates with the proposed reflection prompt and return best WER."""
+    best_entry = min(history, key=lambda h: h["wer"])
+    worst_pool = best_entry.get("worst_samples", [])
+    if not worst_pool:
+        worst_pool = [{"reference": "n/a", "hypothesis": "n/a", "wer": 0.5}]
+
+    candidates = _generate_candidates(
+        history,
+        api_key,
+        n_candidates=2,
+        trajectory_size=trajectory_size,
+        worst_pool=worst_pool,
+        llm_model=llm_model,
+        reflection_prompt=proposed_prompt,
+    )
+
+    best_wer = 1.0
+    for candidate, _ in candidates:
+        results = _evaluate_prompt(
+            candidate, eval_samples, api_key, num_threads, desc="Meta-validation"
+        )
+        wer = _mean_wer(results)
+        if wer < best_wer:
+            best_wer = wer
+    return best_wer
 
 
 def _save_state(state: dict, path: str = "outputs/optimization_state.json") -> None:
@@ -200,8 +334,11 @@ def run_optimization(
     resume_history: list[dict] | None = None,
     seed: int = 42,
     llm_model: str = "claude-sonnet-4-5-20250929",
+    meta_every: int = 3,
 ) -> dict:
     """Run OPRO optimization loop and return results dict."""
+    current_reflection_prompt = REFLECTION_PROMPT
+    reflection_prompt_history: list[dict] = []
 
     def _build_state(history: list[dict], iteration: int = 0) -> dict:
         best = min(history, key=lambda h: h["wer"]) if history else {}
@@ -219,6 +356,8 @@ def run_optimization(
             "trajectory_size": trajectory_size,
             "seed": seed,
             "history": history,
+            "reflection_prompt": current_reflection_prompt,
+            "reflection_prompt_history": reflection_prompt_history,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -273,6 +412,7 @@ def run_optimization(
         best_prev["worst_samples"] = _worst_samples(best_results, n=5)
         _save_state(_build_state(history))
 
+    stale_iterations = 0
     for i in range(1, iterations + 1):
         # Best prompt so far drives the reflection
         best_so_far = min(history, key=lambda h: h["wer"])
@@ -281,19 +421,29 @@ def run_optimization(
             f"(best so far: {best_so_far['wer'] * 100:.2f}%)"
         )
 
-        # Build error samples from current best's evaluation results
-        worst = _worst_samples(best_results)
-        error_samples_text = _format_error_samples(worst)
+        # Build stagnation warning if no improvement for 3+ iterations
+        stagnation_warning = ""
+        if stale_iterations >= 3:
+            stagnation_warning = STAGNATION_WARNING.format(stale_iterations=stale_iterations)
+            console.print(
+                f"    [warning]Stagnant for {stale_iterations} iterations — "
+                f"requesting bolder changes[/warning]"
+            )
 
-        # Generate N candidates in parallel
+        # Build pool of worst error samples for random subsampling
+        worst_pool = _worst_samples(best_results, n=50)
+
+        # Generate N candidates in parallel, each seeing a different error subset
         console.print(f"    Generating {candidates_per_step} candidates...")
         candidates = _generate_candidates(
             history,
             api_key,
             candidates_per_step,
             trajectory_size,
-            error_samples_text,
+            worst_pool,
             llm_model,
+            stagnation_warning=stagnation_warning,
+            reflection_prompt=current_reflection_prompt,
         )
 
         # Evaluate all candidates and add to trajectory
@@ -327,8 +477,48 @@ def run_optimization(
                 f"    [success]New best: {best_so_far['wer'] * 100:.2f}% → "
                 f"{new_best['wer'] * 100:.2f}%[/success]"
             )
+            stale_iterations = 0
         else:
+            stale_iterations += 1
             console.print("    [warning]No new best this iteration[/warning]")
+
+        # Meta-optimization: refine the reflection prompt every meta_every iterations
+        if meta_every > 0 and i % meta_every == 0:
+            console.print(f"    [heading]Meta-optimization step (iteration {i})...[/heading]")
+            proposed = _refine_reflection_prompt(
+                current_reflection_prompt, history, api_key, llm_model
+            )
+            console.print(f'    [muted]Proposed reflection prompt: "{proposed[:100]}..."[/muted]')
+
+            # Validate: generate a small batch with the new prompt and compare
+            current_best_wer = min(h["wer"] for h in history)
+            console.print("    Validating proposed reflection prompt...")
+            validation_wer = _validate_reflection_prompt(
+                proposed,
+                history,
+                eval_samples,
+                api_key,
+                num_threads,
+                trajectory_size,
+                llm_model,
+            )
+            console.print(
+                f"    Validation WER: {validation_wer * 100:.2f}% "
+                f"(current best: {current_best_wer * 100:.2f}%)"
+            )
+
+            if validation_wer < current_best_wer:
+                console.print("    [success]Adopting new reflection prompt[/success]")
+                reflection_prompt_history.append(
+                    {"iteration": i, "prompt": current_reflection_prompt, "action": "replaced"}
+                )
+                current_reflection_prompt = proposed
+            else:
+                console.print("    [warning]Keeping current reflection prompt[/warning]")
+                reflection_prompt_history.append(
+                    {"iteration": i, "prompt": proposed, "action": "rejected"}
+                )
+
         console.print()
 
         _save_state(_build_state(history, iteration=i))

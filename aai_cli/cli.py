@@ -16,7 +16,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
 
-from .optimizer import run_optimization
+from .optimizer import _evaluate_prompt, _mean_wer, run_optimization
 
 THEME = Theme(
     {
@@ -92,10 +92,12 @@ def load_dataset_samples(
     return samples
 
 
-def load_all_datasets(cfg: DictConfig, hf_token: str) -> list[dict]:
+def load_all_datasets(
+    cfg: DictConfig, hf_token: str, total_samples: int | None = None
+) -> list[dict]:
     """Split total samples evenly across configured datasets and collect them."""
     ds_names = list(cfg.datasets.keys())
-    total = cfg.optimization.samples
+    total = total_samples if total_samples is not None else cfg.optimization.samples
     per_ds = total // len(ds_names)
     remainder = total % len(ds_names)
 
@@ -111,9 +113,49 @@ def load_all_datasets(cfg: DictConfig, hf_token: str) -> list[dict]:
     return all_samples
 
 
+def run_eval(cfg: DictConfig, aai_key: str, hf_token: str) -> None:
+    """Run evaluation: transcribe samples, print ref/hyp pairs, and report WER."""
+    console.print("\n  [heading]Loading Datasets[/heading]")
+    samples = load_all_datasets(cfg, hf_token, total_samples=cfg.eval.max_samples)
+
+    prompt = cfg.eval.prompt
+    num_threads = cfg.eval.num_threads
+    console.print(f'\n  [heading]Evaluating with prompt:[/heading] "{prompt}"')
+    console.print(f"  [muted]Samples: {len(samples)}, Threads: {num_threads}[/muted]\n")
+
+    results = _evaluate_prompt(prompt, samples, aai_key, num_threads, desc="Eval")
+
+    console.print("\n  [heading]Results[/heading]\n")
+    for i, r in enumerate(results, 1):
+        wer_pct = r["wer"] * 100
+        if r["wer"] == 0.0:
+            wer_style = "success"
+        elif r["wer"] < 0.1:
+            wer_style = "progress"
+        else:
+            wer_style = "warning"
+
+        console.print(
+            f"  [bold]--- Sample {i}/{len(results)} (WER: [{wer_style}]{wer_pct:.1f}%[/{wer_style}]) ---[/bold]"
+        )
+        console.print(f"  [bold]REF:[/bold] {r['reference']}")
+        console.print(f"  [bold]HYP:[/bold] {r['hypothesis']}")
+        console.print()
+
+    overall_wer = _mean_wer(results)
+    console.print(
+        Panel(
+            f'  WER: [bold]{overall_wer * 100:.2f}%[/bold]  |  Samples: {len(results)}  |  Prompt: "{prompt}"',
+            title="[bold]Evaluation Summary[/bold]",
+            border_style="border",
+            padding=(1, 2),
+        )
+    )
+
+
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
-    """Optimize AssemblyAI universal-3-pro prompts using OPRO."""
+    """AAI CLI — optimize or evaluate AssemblyAI universal-3-pro prompts."""
     for logger_name in (
         "datasets.info",
         "huggingface_hub",
@@ -130,6 +172,14 @@ def main(cfg: DictConfig) -> None:
     aai_key = get_env_key("ASSEMBLYAI_API_KEY")
     hf_token = get_env_key("HF_TOKEN")
     console.print("  [success]All keys loaded from environment[/success]")
+
+    mode = cfg.get("mode", "optimize")
+
+    if mode == "eval":
+        run_eval(cfg, aai_key, hf_token)
+        return
+
+    # --- optimize mode ---
 
     # Check for previous state to resume from
     state_file = Path("outputs") / "optimization_state.json"
@@ -160,6 +210,7 @@ def main(cfg: DictConfig) -> None:
         llm_model=cfg.optimization.llm_model,
         resume_history=resume_history,
         seed=cfg.optimization.seed,
+        meta_every=cfg.optimization.meta_every,
     )
 
     # Add dataset info to result

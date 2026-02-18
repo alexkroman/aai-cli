@@ -1,3 +1,10 @@
+mode: optimize  # optimize | eval
+
+eval:
+  max_samples: 50
+  prompt: "Transcribe verbatim."
+  num_threads: 12
+
 datasets:
   earnings22:
     path: sanchit-gandhi/earnings22_robust_split
@@ -23,11 +30,12 @@ optimization:
   iterations: 10
   starting_prompt: >-
     Transcribe verbatim.
-  candidates_per_step: 5
-  trajectory_size: 5
+  candidates_per_step: 8
+  trajectory_size: 3
   seed: 42
   num_threads: 12
-  llm_model: claude-sonnet-4-5-20250929
+  llm_model: claude-opus-4-6
+  meta_every: 3  # run meta-optimization every N iterations (0 = disabled)
 
 hydra:
   output_subdir: null
