@@ -8,6 +8,12 @@ Optimize AssemblyAI universal-3-pro prompts using OPRO-style optimization.
 poetry install
 ```
 
+To make the `aai` command available globally:
+
+```bash
+pipx install .
+```
+
 ## Environment Variables
 
 Set these before running:
