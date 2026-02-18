@@ -26,18 +26,22 @@ datasets:
     split: test
 
 optimization:
-  samples: 100
-  iterations: 10
+  samples: 50
+  iterations: 5
   starting_prompt: >-
     Transcribe verbatim.
-  candidates_per_step: 8
+  candidates_per_step: 1
   trajectory_size: 3
   seed: 42
   num_threads: 12
-  llm_model: claude-opus-4-6
+  llm_model: claude-sonnet-4-7
   meta_every: 3  # run meta-optimization every N iterations (0 = disabled)
 
 hydra:
   output_subdir: null
   run:
     dir: .
+  job_logging:
+    handlers:
+      file:
+        filename: /dev/null

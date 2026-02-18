@@ -1,19 +1,24 @@
 """OPRO-style optimization loop for ASR prompts."""
 
 import json
+import logging
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import jiwer
-from openai import OpenAI
+import litellm
 from rich.console import Console
+from rich.markdown import Markdown
 from tqdm import tqdm
 from whisper_normalizer.english import EnglishTextNormalizer
 
 from .transcribe import transcribe_assemblyai
 
 _normalize = EnglishTextNormalizer()
+
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+litellm.suppress_debug_info = True
 
 REFLECTION_PROMPT = """\
 You are an expert prompt engineer optimizing instructions for an \
@@ -90,6 +95,17 @@ approach, reorder instructions, remove ineffective clauses, or reframe the \
 task from scratch. Do not make small tweaks.
 
 """
+
+
+def _llm_complete(prompt: str, llm_model: str = "claude-sonnet-4-5-20250929") -> str:
+    """Call the LLM and return the response text."""
+    response = litellm.completion(
+        model=f"anthropic/{llm_model}",
+        max_tokens=16000,
+        num_retries=2,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return (response.choices[0].message.content or "").strip()
 
 
 def _compute_wer(reference: str, hypothesis: str) -> float:
@@ -170,7 +186,6 @@ def _format_trajectory(history: list[dict], max_size: int = 20) -> str:
 
 def _propose_prompt(
     history: list[dict],
-    aai_key: str,
     trajectory_size: int = 20,
     error_samples: str = "",
     llm_model: str = "claude-sonnet-4-5-20250929",
@@ -187,22 +202,11 @@ def _propose_prompt(
         stagnation_warning=stagnation_warning,
     )
 
-    client = OpenAI(
-        api_key=aai_key,
-        base_url="https://llm-gateway.assemblyai.com/v1",
-    )
-    response = client.chat.completions.create(
-        model=llm_model,
-        max_tokens=16000,
-        messages=[{"role": "user", "content": full_prompt}],
-    )
-    text = response.choices[0].message.content or ""
-    return text.strip(), full_prompt
+    return _llm_complete(full_prompt, llm_model), full_prompt
 
 
 def _generate_candidates(
     history: list[dict],
-    aai_key: str,
     n_candidates: int,
     trajectory_size: int,
     worst_pool: list[dict],
@@ -212,33 +216,36 @@ def _generate_candidates(
     reflection_prompt: str | None = None,
 ) -> list[tuple[str, str]]:
     """Generate N candidate prompts in parallel, each seeing a different random subset of errors."""
-    results: list[tuple[str, str]] = []
-    with ThreadPoolExecutor(max_workers=n_candidates) as pool:
-        futures = []
-        for _ in range(n_candidates):
-            subset = random.sample(worst_pool, min(error_sample_size, len(worst_pool)))
-            error_text = _format_error_samples(subset)
-            futures.append(
-                pool.submit(
-                    _propose_prompt,
-                    history,
-                    aai_key,
-                    trajectory_size,
-                    error_text,
-                    llm_model,
-                    stagnation_warning,
-                    reflection_prompt,
-                )
+    trajectory = _format_trajectory(history, max_size=trajectory_size)
+    template = reflection_prompt if reflection_prompt is not None else REFLECTION_PROMPT
+
+    full_prompts: list[str] = []
+    for _ in range(n_candidates):
+        subset = random.sample(worst_pool, min(error_sample_size, len(worst_pool)))
+        error_text = _format_error_samples(subset)
+        full_prompts.append(
+            template.format(
+                trajectory=trajectory,
+                error_samples=error_text,
+                stagnation_warning=stagnation_warning,
             )
-        for future in as_completed(futures):
-            results.append(future.result())
-    return results
+        )
+
+    responses = litellm.batch_completion(
+        model=f"anthropic/{llm_model}",
+        messages=[[{"role": "user", "content": p}] for p in full_prompts],
+        max_tokens=16000,
+    )
+
+    return [
+        ((r.choices[0].message.content or "").strip(), full_prompts[i])
+        for i, r in enumerate(responses)
+    ]
 
 
 def _refine_reflection_prompt(
     current_reflection_prompt: str,
     history: list[dict],
-    aai_key: str,
     llm_model: str = "claude-sonnet-4-5-20250929",
 ) -> str:
     """Ask the LLM to propose an improved reflection prompt based on recent evidence."""
@@ -264,17 +271,7 @@ def _refine_reflection_prompt(
         failed_prompts=failed_text,
     )
 
-    client = OpenAI(
-        api_key=aai_key,
-        base_url="https://llm-gateway.assemblyai.com/v1",
-    )
-    response = client.chat.completions.create(
-        model=llm_model,
-        max_tokens=16000,
-        messages=[{"role": "user", "content": meta_prompt}],
-    )
-    text = response.choices[0].message.content or ""
-    return text.strip()
+    return _llm_complete(meta_prompt, llm_model)
 
 
 def _validate_reflection_prompt(
@@ -294,7 +291,6 @@ def _validate_reflection_prompt(
 
     candidates = _generate_candidates(
         history,
-        api_key,
         n_candidates=2,
         trajectory_size=trajectory_size,
         worst_pool=worst_pool,
@@ -313,8 +309,10 @@ def _validate_reflection_prompt(
     return best_wer
 
 
-def _save_state(state: dict, path: str = "outputs/optimization_state.json") -> None:
+def _save_state(state: dict, path: str | None = None) -> None:
     """Persist optimization state to disk for crash recovery."""
+    if path is None:
+        return
     from pathlib import Path
 
     p = Path(path)
@@ -335,8 +333,10 @@ def run_optimization(
     seed: int = 42,
     llm_model: str = "claude-sonnet-4-5-20250929",
     meta_every: int = 3,
+    output_path: str | None = None,
 ) -> dict:
     """Run OPRO optimization loop and return results dict."""
+
     current_reflection_prompt = REFLECTION_PROMPT
     reflection_prompt_history: list[dict] = []
 
@@ -366,26 +366,28 @@ def run_optimization(
     rng = random.Random(seed)
     rng.shuffle(eval_samples)
 
-    console.print("\n  [bold progress]Starting optimization...[/bold progress]")
+    console.print(Markdown("## Starting Optimization"))
     console.print(
-        f"  Samples: {len(eval_samples)}, Iterations: {iterations}, "
-        f"Candidates/step: {candidates_per_step}\n"
+        Markdown(
+            f"*Samples: {len(eval_samples)}, Iterations: {iterations}, "
+            f"Candidates/step: {candidates_per_step}*"
+        )
     )
 
     if resume_history:
         history = list(resume_history)
-        console.print(f"  [progress]Resuming from previous run ({len(history)} entries)[/progress]")
+        console.print(Markdown(f"**Resuming from previous run ({len(history)} entries)**"))
     else:
         history = []
 
     # Evaluate starting prompt if no history or if starting fresh
     if not history or history[0]["prompt"] != starting_prompt:
-        console.print("  [progress]Evaluating starting prompt...[/progress]")
+        console.print(Markdown("**Evaluating starting prompt...**"))
         baseline_results = _evaluate_prompt(
             starting_prompt, eval_samples, api_key, num_threads, desc="Baseline"
         )
         baseline_wer = _mean_wer(baseline_results)
-        console.print(f"  Starting WER: [bold]{baseline_wer * 100:.2f}%[/bold]")
+        console.print(Markdown(f"Starting WER: **{baseline_wer * 100:.2f}%**"))
         history.append(
             {
                 "prompt": starting_prompt,
@@ -394,31 +396,31 @@ def run_optimization(
             }
         )
         best_results = baseline_results
-        _save_state(_build_state(history))
+        _save_state(_build_state(history), path=output_path)
     else:
         # Re-evaluate the best prompt from history on current data
         best_prev = min(history, key=lambda h: h["wer"])
         console.print(
-            f"  [progress]Re-evaluating best prompt "
-            f"(prev WER: {best_prev['wer'] * 100:.2f}%)...[/progress]"
+            Markdown(f"**Re-evaluating best prompt (prev WER: {best_prev['wer'] * 100:.2f}%)...**")
         )
         best_results = _evaluate_prompt(
             best_prev["prompt"], eval_samples, api_key, num_threads, desc="Resume baseline"
         )
         resume_wer = _mean_wer(best_results)
-        console.print(f"  Baseline WER: [bold]{resume_wer * 100:.2f}%[/bold]")
+        console.print(Markdown(f"Baseline WER: **{resume_wer * 100:.2f}%**"))
         # Update existing entry instead of appending a duplicate
         best_prev["wer"] = resume_wer
         best_prev["worst_samples"] = _worst_samples(best_results, n=5)
-        _save_state(_build_state(history))
+        _save_state(_build_state(history), path=output_path)
 
     stale_iterations = 0
     for i in range(1, iterations + 1):
         # Best prompt so far drives the reflection
         best_so_far = min(history, key=lambda h: h["wer"])
         console.print(
-            f"  [progress]Iteration {i}/{iterations}[/progress] "
-            f"(best so far: {best_so_far['wer'] * 100:.2f}%)"
+            Markdown(
+                f"### Iteration {i}/{iterations} (best so far: {best_so_far['wer'] * 100:.2f}%)"
+            )
         )
 
         # Build stagnation warning if no improvement for 3+ iterations
@@ -426,18 +428,18 @@ def run_optimization(
         if stale_iterations >= 3:
             stagnation_warning = STAGNATION_WARNING.format(stale_iterations=stale_iterations)
             console.print(
-                f"    [warning]Stagnant for {stale_iterations} iterations — "
-                f"requesting bolder changes[/warning]"
+                Markdown(
+                    f"*Stagnant for {stale_iterations} iterations — requesting bolder changes*"
+                )
             )
 
         # Build pool of worst error samples for random subsampling
         worst_pool = _worst_samples(best_results, n=50)
 
         # Generate N candidates in parallel, each seeing a different error subset
-        console.print(f"    Generating {candidates_per_step} candidates...")
+        console.print(Markdown(f"Generating {candidates_per_step} candidates..."))
         candidates = _generate_candidates(
             history,
-            api_key,
             candidates_per_step,
             trajectory_size,
             worst_pool,
@@ -448,7 +450,7 @@ def run_optimization(
 
         # Evaluate all candidates and add to trajectory
         for j, (candidate, _) in enumerate(candidates, 1):
-            console.print(f'    [muted]Candidate {j}: "{candidate[:80]}..."[/muted]')
+            console.print(Markdown(f'*Candidate {j}: "{candidate[:80]}..."*'))
             candidate_results = _evaluate_prompt(
                 candidate,
                 eval_samples,
@@ -464,7 +466,7 @@ def run_optimization(
                     "worst_samples": _worst_samples(candidate_results, n=5),
                 }
             )
-            console.print(f"      WER: {candidate_wer * 100:.2f}%")
+            console.print(Markdown(f"WER: **{candidate_wer * 100:.2f}%**"))
 
             # Track results from the best candidate for error samples
             if candidate_wer <= min(h["wer"] for h in history):
@@ -474,25 +476,24 @@ def run_optimization(
         new_best = min(history, key=lambda h: h["wer"])
         if new_best["wer"] < best_so_far["wer"]:
             console.print(
-                f"    [success]New best: {best_so_far['wer'] * 100:.2f}% → "
-                f"{new_best['wer'] * 100:.2f}%[/success]"
+                Markdown(
+                    f"**New best: {best_so_far['wer'] * 100:.2f}% → {new_best['wer'] * 100:.2f}%**"
+                )
             )
             stale_iterations = 0
         else:
             stale_iterations += 1
-            console.print("    [warning]No new best this iteration[/warning]")
+            console.print(Markdown("*No new best this iteration*"))
 
         # Meta-optimization: refine the reflection prompt every meta_every iterations
         if meta_every > 0 and i % meta_every == 0:
-            console.print(f"    [heading]Meta-optimization step (iteration {i})...[/heading]")
-            proposed = _refine_reflection_prompt(
-                current_reflection_prompt, history, api_key, llm_model
-            )
-            console.print(f'    [muted]Proposed reflection prompt: "{proposed[:100]}..."[/muted]')
+            console.print(Markdown(f"**Meta-optimization step (iteration {i})...**"))
+            proposed = _refine_reflection_prompt(current_reflection_prompt, history, llm_model)
+            console.print(Markdown(f'*Proposed reflection prompt: "{proposed[:100]}..."*'))
 
             # Validate: generate a small batch with the new prompt and compare
             current_best_wer = min(h["wer"] for h in history)
-            console.print("    Validating proposed reflection prompt...")
+            console.print(Markdown("Validating proposed reflection prompt..."))
             validation_wer = _validate_reflection_prompt(
                 proposed,
                 history,
@@ -503,28 +504,30 @@ def run_optimization(
                 llm_model,
             )
             console.print(
-                f"    Validation WER: {validation_wer * 100:.2f}% "
-                f"(current best: {current_best_wer * 100:.2f}%)"
+                Markdown(
+                    f"Validation WER: **{validation_wer * 100:.2f}%** "
+                    f"(current best: {current_best_wer * 100:.2f}%)"
+                )
             )
 
             if validation_wer < current_best_wer:
-                console.print("    [success]Adopting new reflection prompt[/success]")
+                console.print(Markdown("**Adopting new reflection prompt**"))
                 reflection_prompt_history.append(
                     {"iteration": i, "prompt": current_reflection_prompt, "action": "replaced"}
                 )
                 current_reflection_prompt = proposed
             else:
-                console.print("    [warning]Keeping current reflection prompt[/warning]")
+                console.print(Markdown("*Keeping current reflection prompt*"))
                 reflection_prompt_history.append(
                     {"iteration": i, "prompt": proposed, "action": "rejected"}
                 )
 
         console.print()
 
-        _save_state(_build_state(history, iteration=i))
+        _save_state(_build_state(history, iteration=i), path=output_path)
 
     # Best prompt across the entire trajectory
     best = min(history, key=lambda h: h["wer"])
-    console.print(f"  [bold success]Best WER: {best['wer'] * 100:.2f}%[/bold success]\n")
+    console.print(Markdown(f"**Best WER: {best['wer'] * 100:.2f}%**"))
 
     return _build_state(history, iteration=iterations)

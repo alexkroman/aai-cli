@@ -1,4 +1,4 @@
-"""Entry point — Hydra-based declarative config."""
+"""Entry point — routes to aider (default) or Hydra optimize/eval subcommands."""
 
 import json
 import logging
@@ -13,45 +13,23 @@ from huggingface_hub import login as hf_login
 from omegaconf import DictConfig
 from rich.console import Console
 from rich.panel import Panel
-from rich.text import Text
-from rich.theme import Theme
 
 from .optimizer import _evaluate_prompt, _mean_wer, run_optimization
 
-THEME = Theme(
-    {
-        "banner": "bold cyan",
-        "border": "bright_blue",
-        "heading": "bold bright_blue",
-        "progress": "cyan",
-        "success": "green",
-        "warning": "yellow",
-        "muted": "dim",
-    }
-)
-
-console = Console(theme=THEME)
-
-SUBTITLE = "Prompt Optimizer for Universal-3-Pro"
+console = Console()
 
 
 def print_banner():
     figlet_text = pyfiglet.figlet_format("AAI", font="slant")
-    banner = figlet_text.rstrip() + "\n\n" + SUBTITLE
-    console.print(
-        Panel(
-            Text(banner, style="banner"),
-            border_style="border",
-            padding=(0, 2),
-        )
-    )
+    banner = figlet_text.rstrip()
+    console.print(Panel(banner, padding=(0, 2)))
 
 
 def get_env_key(name: str) -> str:
     """Read a required environment variable or exit with a clear error."""
     value = os.environ.get(name, "")
     if not value:
-        console.print(f"  [warning]Missing env var: {name}[/warning]")
+        console.print(f"  Missing env var: {name}", style="bold red")
         sys.exit(1)
     return value
 
@@ -60,7 +38,7 @@ def load_dataset_samples(
     ds_name: str, ds_cfg: DictConfig, num_samples: int, hf_token: str
 ) -> list[dict]:
     """Load samples from one HF dataset."""
-    console.print(f"  [progress]Loading {ds_name}...[/progress]")
+    console.print(f"Loading [italic]{ds_name}[/italic]...")
     hf_login(token=hf_token, add_to_git_credential=False)
 
     kwargs: dict = {
@@ -88,7 +66,7 @@ def load_dataset_samples(
         if len(samples) >= num_samples:
             break
 
-    console.print(f"  [success]Loaded {len(samples)} samples from {ds_name}[/success]")
+    console.print(f"Loaded [bold]{len(samples)}[/bold] samples from [italic]{ds_name}[/italic]")
     return samples
 
 
@@ -108,53 +86,39 @@ def load_all_datasets(
         all_samples.extend(samples)
 
     console.print(
-        f"  [success]Total: {len(all_samples)} samples from {len(ds_names)} datasets[/success]"
+        f"Total: [bold]{len(all_samples)}[/bold] samples from [bold]{len(ds_names)}[/bold] datasets"
     )
     return all_samples
 
 
 def run_eval(cfg: DictConfig, aai_key: str, hf_token: str) -> None:
     """Run evaluation: transcribe samples, print ref/hyp pairs, and report WER."""
-    console.print("\n  [heading]Loading Datasets[/heading]")
+    console.print("Loading datasets...")
     samples = load_all_datasets(cfg, hf_token, total_samples=cfg.eval.max_samples)
 
     prompt = cfg.eval.prompt
     num_threads = cfg.eval.num_threads
-    console.print(f'\n  [heading]Evaluating with prompt:[/heading] "{prompt}"')
-    console.print(f"  [muted]Samples: {len(samples)}, Threads: {num_threads}[/muted]\n")
+    console.print(f'[bold]Evaluating with prompt:[/bold] "{prompt}"')
+    console.print(f"[dim]Samples: {len(samples)}, Threads: {num_threads}[/dim]")
 
     results = _evaluate_prompt(prompt, samples, aai_key, num_threads, desc="Eval")
 
-    console.print("\n  [heading]Results[/heading]\n")
+    console.print()
     for i, r in enumerate(results, 1):
         wer_pct = r["wer"] * 100
-        if r["wer"] == 0.0:
-            wer_style = "success"
-        elif r["wer"] < 0.1:
-            wer_style = "progress"
-        else:
-            wer_style = "warning"
-
-        console.print(
-            f"  [bold]--- Sample {i}/{len(results)} (WER: [{wer_style}]{wer_pct:.1f}%[/{wer_style}]) ---[/bold]"
-        )
-        console.print(f"  [bold]REF:[/bold] {r['reference']}")
-        console.print(f"  [bold]HYP:[/bold] {r['hypothesis']}")
+        console.print(f"[bold]Sample {i}/{len(results)}[/bold] (WER: {wer_pct:.1f}%)")
+        console.print(f"  REF: {r['reference']}")
+        console.print(f"  HYP: {r['hypothesis']}")
         console.print()
 
     overall_wer = _mean_wer(results)
     console.print(
-        Panel(
-            f'  WER: [bold]{overall_wer * 100:.2f}%[/bold]  |  Samples: {len(results)}  |  Prompt: "{prompt}"',
-            title="[bold]Evaluation Summary[/bold]",
-            border_style="border",
-            padding=(1, 2),
-        )
+        f'[bold]WER: {overall_wer * 100:.2f}%[/bold] | Samples: {len(results)} | Prompt: "{prompt}"'
     )
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
-def main(cfg: DictConfig) -> None:
+def hydra_main(cfg: DictConfig) -> None:
     """AAI CLI — optimize or evaluate AssemblyAI universal-3-pro prompts."""
     for logger_name in (
         "datasets.info",
@@ -165,13 +129,8 @@ def main(cfg: DictConfig) -> None:
     ):
         logging.getLogger(logger_name).setLevel(logging.CRITICAL)
 
-    print_banner()
-
-    # API keys from env vars
-    console.print("  [heading]API Keys[/heading]")
     aai_key = get_env_key("ASSEMBLYAI_API_KEY")
     hf_token = get_env_key("HF_TOKEN")
-    console.print("  [success]All keys loaded from environment[/success]")
 
     mode = cfg.get("mode", "optimize")
 
@@ -181,21 +140,29 @@ def main(cfg: DictConfig) -> None:
 
     # --- optimize mode ---
 
-    # Check for previous state to resume from
-    state_file = Path("outputs") / "optimization_state.json"
+    # Only resume from previous state when explicitly requested
     resume_history = None
-    if state_file.exists():
-        prev_state = json.loads(state_file.read_text())
-        if "history" in prev_state and prev_state["history"]:
-            resume_history = prev_state["history"]
-            console.print(
-                f"\n  [heading]Resuming from {state_file} "
-                f"({len(resume_history)} previous entries)[/heading]"
-            )
+    resume_path = cfg.get("resume", None)
+    if resume_path:
+        state_file = Path(resume_path)
+        if state_file.exists():
+            prev_state = json.loads(state_file.read_text())
+            if "history" in prev_state and prev_state["history"]:
+                resume_history = prev_state["history"]
+                console.print(
+                    f"[bold]Resuming from {state_file} "
+                    f"({len(resume_history)} previous entries)[/bold]"
+                )
+        else:
+            console.print(f"[bold red]Resume file not found: {state_file}[/bold red]")
+            sys.exit(1)
 
     # Load data
-    console.print("\n  [heading]Loading Datasets[/heading]")
+    console.print("Loading datasets...")
     eval_samples = load_all_datasets(cfg, hf_token)
+
+    # Determine output path (optional)
+    output_file = cfg.get("output", None)
 
     # Run optimization
     result = run_optimization(
@@ -211,6 +178,7 @@ def main(cfg: DictConfig) -> None:
         resume_history=resume_history,
         seed=cfg.optimization.seed,
         meta_every=cfg.optimization.meta_every,
+        output_path=output_file,
     )
 
     # Add dataset info to result
@@ -219,20 +187,42 @@ def main(cfg: DictConfig) -> None:
     # Display result
     best = result["best_prompt"]
     console.print()
-    console.print("  [bold success]Best prompt:[/bold success]")
-    console.print(f"\n{best}\n")
+    console.print(f"[bold]Best Prompt:[/bold] {best}")
 
-    # Save
-    output_path = Path("outputs")
-    output_path.mkdir(parents=True, exist_ok=True)
-    state_file = output_path / "optimization_state.json"
-    state_file.write_text(json.dumps(result, indent=2))
-    console.print(f"\n  [muted]Saved to {state_file}[/muted]\n")
+    if output_file:
+        p = Path(output_file)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(result, indent=2))
+        console.print(f"[dim]Saved to {p}[/dim]")
+    console.print()
+
+
+def launch_agent(extra_args: list[str]) -> None:
+    """Launch the built-in coding agent."""
+    from .agent import run_agent
+
+    print_banner()
+    run_agent(extra_args or None)
 
 
 def app():
-    """Entry point for `[project.scripts]`."""
-    main()
+    """Entry point for `[project.scripts]`.
+
+    Routes:
+      aai                        → launch coding agent (default)
+      aai optimize [hydra-args]  → prompt optimization
+      aai eval [hydra-args]      → evaluation
+    """
+    args = sys.argv[1:]
+
+    if args and args[0] == "optimize":
+        sys.argv = [sys.argv[0]] + ["mode=optimize"] + args[1:]
+        hydra_main()
+    elif args and args[0] == "eval":
+        sys.argv = [sys.argv[0]] + ["mode=eval"] + args[1:]
+        hydra_main()
+    else:
+        launch_agent(args)
 
 
 if __name__ == "__main__":

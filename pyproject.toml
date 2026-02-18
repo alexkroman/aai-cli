@@ -32,10 +32,10 @@ dependencies = [
     "whisper-normalizer>=0.1",
     "datasets[audio]>=2.14",
     "assemblyai>=0.30",
-    "openai>=1.0",
     "jiwer>=3.0",
     "pyfiglet>=1.0",
     "tqdm>=4.66",
+    "smolagents[litellm]>=1.24",
 ]
 
 [project.urls]
