@@ -1,0 +1,50 @@
+datasets:
+  earnings22:
+    path: sanchit-gandhi/earnings22_robust_split
+    config: default
+    audio_column: audio
+    text_column: sentence
+    split: test
+  peoples:
+    path: fixie-ai/peoples_speech
+    config: clean
+    audio_column: audio
+    text_column: text
+    split: test
+  ami:
+    path: edinburghcstr/ami
+    config: ihm
+    audio_column: audio
+    text_column: text
+    split: test
+
+optimization:
+  samples: 50
+  iterations: 5
+  starting_prompt: >-
+    Transcribe every spoken word in the audio exactly as it occurs, from the very first word to the very last. Output only the words that were actually spoken in the audio. Do not    
+    add speaker labels, bracketed annotations, timestamps, or any text not actually spoken. Do not insert "[Speaker]" or any similar tags. Do not add commentary, headers, or metadata  
+    of any kind. Output only spoken words, nothing else.                                                                                                                                                                                                                                                                                                                        
+
+    Never produce an empty or blank transcript. If any speech at all is audible, you must output it. Even if the audio contains only a single word such as "yeah" or "okay,"            
+    transcribe that word. Short utterances, single-word responses, and brief affirmations must always be transcribed. A silent or empty output is never acceptable when any speech is   
+    present. Listen carefully to the entire audio from beginning to end before producing output.                                                                                        
+                                                                                                                                                                                          
+    Transcribe in plain lowercase text without punctuation, capitalization, or formatting. Do not add periods, commas, or any punctuation marks. Preserve filler words like "um" "uh"   
+    and "you know" exactly when spoken. Include all brief utterances such as "yeah" "okay" "right" "no" "yes" and "mhm" when spoken. Capture incomplete sentences, interruptions,       
+    false starts, repeated words, and self-corrections exactly as they occur.                                                                                                           
+                                                                                                                                                                                        
+    Do not paraphrase, summarize, or rephrase any speech. Do not skip or omit any segment of audio. Do not combine or split words. Transcribe every audible word in chronological       
+    order. When multiple speakers are present, transcribe all words from all speakers in the order they occur without any speaker identification markers.                               
+                                                                                                                                                                                        
+    Listen to the full duration of the audio carefully. Some audio may be quiet or have low volume. Transcribe all speech regardless of audio quality or volume level. If speech is     
+    faint or partially obscured, make your best effort to transcribe the words spoken. Always produce output containing the spoken words. Never return empty or blank output.
+  candidates_per_step: 8
+  trajectory_size: 5
+  seed: 42
+  num_threads: 24
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .
