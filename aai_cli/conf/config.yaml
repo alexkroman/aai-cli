@@ -2,6 +2,7 @@ eval:
   max_samples: 50
   prompt: "Transcribe verbatim."
   num_threads: 12
+  speech_model: universal-3-pro  # batch API; use "u3-pro" for streaming API
 
 datasets:
   earnings22:

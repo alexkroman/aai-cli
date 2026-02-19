@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 from .eval import compute_wer
+from .streaming import is_streaming_model, transcribe_streaming
 from .transcribe import transcribe_assemblyai
 
 logging.getLogger("dspy").setLevel(logging.WARNING)
@@ -28,15 +29,19 @@ class Transcribe(dspy.Signature):
 class ASRModule(dspy.Module):
     """Wrapper that routes DSPy instruction optimization to AssemblyAI."""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, speech_model: str = "universal-3-pro"):
         super().__init__()
         self.predict = dspy.Predict(Transcribe)
         self.api_key = api_key
+        self.speech_model = speech_model
 
     def forward(self, audio_id):
         prompt = self.predict.signature.instructions
         audio = _audio_store[int(audio_id)]
-        hyp = transcribe_assemblyai(audio, prompt, self.api_key)
+        if is_streaming_model(self.speech_model):
+            hyp = transcribe_streaming(audio, prompt, self.api_key, speech_model=self.speech_model)
+        else:
+            hyp = transcribe_assemblyai(audio, prompt, self.api_key)
         return dspy.Prediction(transcription=hyp)
 
 

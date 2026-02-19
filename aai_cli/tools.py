@@ -76,6 +76,7 @@ def eval_prompt(
     prompt: str,
     max_samples: int = 10,
     num_threads: int = 12,
+    speech_model: str = "universal-3-pro",
     dataset: str = "all",
     hf_dataset: str = "",
     hf_config: str = "default",
@@ -92,10 +93,17 @@ def eval_prompt(
     Use this when a user asks to evaluate, test, or benchmark AssemblyAI transcription,
     measure WER, or compare prompt performance.
 
+    IMPORTANT: "universal-3-pro" and "u3-pro" are DIFFERENT models with different APIs.
+    They are NOT interchangeable. "u3-pro" is NOT shorthand for "universal-3-pro".
+    - "universal-3-pro" (default): batch API — uploads audio, gets results back.
+    - "u3-pro": streaming API — sends audio over a WebSocket in real time.
+    When unsure which model the user wants, ask them to clarify batch vs streaming.
+
     Args:
         prompt: The transcription prompt to evaluate (e.g. "Transcribe verbatim.").
         max_samples: Number of audio samples to transcribe (default: 10 for quick test, use 50+ for reliable results).
         num_threads: Parallel transcription threads (default: 12).
+        speech_model: Speech model to use. "universal-3-pro" (batch) or "u3-pro" (streaming). Default: "universal-3-pro".
         dataset: Preconfigured dataset shortcut. One of "earnings22", "peoples", "ami", or "all" (default). Ignored when hf_dataset is set.
         hf_dataset: Any HF audio dataset path (e.g. "mozilla-foundation/common_voice_11_0"). Overrides dataset.
         hf_config: HF dataset config/subset name (default: "default").
@@ -108,6 +116,7 @@ def eval_prompt(
         f"--prompt {shlex.quote(prompt)}",
         f"--max-samples {max_samples}",
         f"--num-threads {num_threads}",
+        f"--speech-model {shlex.quote(speech_model)}",
         *_hf_dataset_args(hf_dataset, hf_config, audio_column, text_column, split, dataset),
     ]
 

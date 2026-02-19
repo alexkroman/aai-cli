@@ -1,4 +1,4 @@
-"""AssemblyAI transcription helper."""
+"""AssemblyAI batch transcription helper."""
 
 import io
 
@@ -10,7 +10,7 @@ SPEECH_MODEL = "universal-3-pro"
 
 
 def transcribe_assemblyai(audio, prompt: str, api_key: str) -> str:
-    """Transcribe audio using AssemblyAI with the given prompt."""
+    """Transcribe audio using the AssemblyAI batch API (universal-3-pro)."""
     aai.settings.api_key = api_key
     config = aai.TranscriptionConfig(
         speech_models=[SPEECH_MODEL],

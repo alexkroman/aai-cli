@@ -14,6 +14,7 @@ from omegaconf import DictConfig, OmegaConf
 from rich.console import Console
 
 from .optimizer import ASRModule, _audio_store, run_optimization, wer_metric
+from .streaming import is_streaming_model
 
 console = Console()
 
@@ -149,8 +150,12 @@ def run_eval(cfg: DictConfig, aai_key: str, hf_token: str) -> None:
 
     prompt = cfg.eval.prompt
     num_threads = cfg.eval.num_threads
+    speech_model = cfg.eval.speech_model
+    api_mode = "streaming" if is_streaming_model(speech_model) else "batch"
     console.print(f'[bold]Evaluating with prompt:[/bold] "{prompt}"')
-    console.print(f"[dim]Samples: {len(samples)}, Threads: {num_threads}[/dim]")
+    console.print(
+        f"[dim]Model: {speech_model} ({api_mode}), Samples: {len(samples)}, Threads: {num_threads}[/dim]"
+    )
 
     _audio_store.clear()
     trainset = []
@@ -158,7 +163,7 @@ def run_eval(cfg: DictConfig, aai_key: str, hf_token: str) -> None:
         _audio_store[i] = s["audio"]
         trainset.append(dspy.Example(audio_id=i, reference=s["reference"]).with_inputs("audio_id"))
 
-    student = ASRModule(aai_key)
+    student = ASRModule(aai_key, speech_model=speech_model)
     student.predict.signature = student.predict.signature.with_instructions(prompt)
 
     result = dspy.Evaluate(
@@ -170,7 +175,7 @@ def run_eval(cfg: DictConfig, aai_key: str, hf_token: str) -> None:
 
     wer_pct = 100.0 - result.score
     console.print(
-        f'[bold]WER: {wer_pct:.2f}%[/bold] | Samples: {len(samples)} | Prompt: "{prompt}"'
+        f'[bold]WER: {wer_pct:.2f}%[/bold] | Model: {speech_model} ({api_mode}) | Samples: {len(samples)} | Prompt: "{prompt}"'
     )
 
 
@@ -266,6 +271,10 @@ def eval_cmd(
     prompt: str | None = typer.Option(None, help="Transcription prompt"),
     max_samples: int | None = typer.Option(None, help="Number of samples"),
     num_threads: int | None = typer.Option(None, help="Parallel threads"),
+    speech_model: str | None = typer.Option(
+        None,
+        help="Speech model: 'universal-3-pro' (batch API) or 'u3-pro' (streaming API)",
+    ),
     dataset: str | None = typer.Option(None, help="Dataset name or 'all'"),
     hf_dataset: str | None = typer.Option(
         None, help="HF dataset path (e.g. mozilla-foundation/common_voice_11_0)"
@@ -290,6 +299,8 @@ def eval_cmd(
         overrides.setdefault("eval", {})["max_samples"] = max_samples
     if num_threads is not None:
         overrides.setdefault("eval", {})["num_threads"] = num_threads
+    if speech_model is not None:
+        overrides.setdefault("eval", {})["speech_model"] = speech_model
 
     cfg = load_config(overrides or None, cfg_path=config)
     if hf_dataset:

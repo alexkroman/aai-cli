@@ -163,7 +163,12 @@ def test_run_eval_shows_wer(mock_load, mock_transcribe, capsys):
     mock_transcribe.side_effect = ["hello world", "foo baz", "test"]
     cfg = OmegaConf.create(
         {
-            "eval": {"max_samples": 3, "prompt": "Transcribe.", "num_threads": 1},
+            "eval": {
+                "max_samples": 3,
+                "prompt": "Transcribe.",
+                "num_threads": 1,
+                "speech_model": "universal-3-pro",
+            },
             "datasets": {},
         }
     )
@@ -179,7 +184,12 @@ def test_run_eval_perfect_wer(mock_load, mock_transcribe, capsys):
     mock_load.return_value = [{"audio": {"bytes": b"x"}, "reference": "hello world"}]
     cfg = OmegaConf.create(
         {
-            "eval": {"max_samples": 1, "prompt": "Transcribe.", "num_threads": 1},
+            "eval": {
+                "max_samples": 1,
+                "prompt": "Transcribe.",
+                "num_threads": 1,
+                "speech_model": "universal-3-pro",
+            },
             "datasets": {},
         }
     )
