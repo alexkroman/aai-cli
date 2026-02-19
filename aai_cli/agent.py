@@ -58,19 +58,17 @@ def _step_log(step, agent=None):
     if not _console or not hasattr(step, "step_number"):
         return
 
-    # Extract the first meaningful line of the agent's reasoning
-    if hasattr(step, "model_output") and step.model_output:
-        text = step.model_output.split("```")[0].strip()
-        for line in text.splitlines():
-            line = line.strip().lstrip("#").strip()
-            for prefix in ("Thought:", "Execution logs:", "Code:"):
-                if line.startswith(prefix):
-                    line = line[len(prefix) :].strip()
-            if line and len(line) > 10:
-                if len(line) > 140:
-                    line = line[:140] + "…"
-                _console.print(f"\n  ⏺ {line}", style="dim")
-                break
+    if step.tool_calls:
+        tc = step.tool_calls[0]
+        args = tc.arguments if isinstance(tc.arguments, str) else ""
+        _console.print(f"\n⏺ {tc.name}({args})", style="dim")
+    if step.observations:
+        skip = {"Execution logs:", "Last output from code snippet:", ""}
+        lines = [ln for ln in step.observations.strip().splitlines() if ln.strip() not in skip]
+        for line in lines[:3]:
+            _console.print(f"⎿  {line}", style="dim")
+        if len(lines) > 3:
+            _console.print(f"⎿  … +{len(lines) - 3} lines", style="dim")
 
 
 def _prune_old_steps(step, agent=None):
@@ -100,10 +98,14 @@ def create_agent(anthropic_key: str, console: Console, cwd: str) -> CodeAgent:
 
     litellm.suppress_debug_info = True
     litellm.drop_params = True
+    litellm.modify_params = True
+    litellm.num_retries = 2
+    litellm.request_timeout = 120
 
     model = LiteLLMModel(
         model_id=f"anthropic/{DEFAULT_MODEL}",
         api_key=anthropic_key,
+        max_tokens=8096,
     )
 
     tools = [

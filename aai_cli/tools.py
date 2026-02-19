@@ -20,7 +20,7 @@ def init_tools(console: Console, cwd: str) -> None:
     _cwd = cwd
 
 
-def _run_aai_cmd(cmd: str, timeout: int = 600) -> str:
+def _run_aai_cmd(cmd: str, timeout: int = 600, quiet: bool = False) -> str:
     """Run an `aai` CLI command, stream output live, and return it."""
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     proc = subprocess.Popen(
@@ -34,8 +34,6 @@ def _run_aai_cmd(cmd: str, timeout: int = 600) -> str:
     )
     lines: list[str] = []
     try:
-        # Use readline() instead of iterator to avoid read-ahead buffering deadlocks
-        # with tqdm \r output filling the pipe buffer.
         while True:
             line = proc.stdout.readline() if proc.stdout else ""
             if not line and proc.poll() is not None:
@@ -43,7 +41,7 @@ def _run_aai_cmd(cmd: str, timeout: int = 600) -> str:
             if line:
                 line = line.rstrip("\n")
                 lines.append(line)
-                if _console:
+                if _console and not quiet:
                     _console.print(f"    {line}", style="dim")
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -113,7 +111,7 @@ def eval_prompt(
         *_hf_dataset_args(hf_dataset, hf_config, audio_column, text_column, split, dataset),
     ]
 
-    return _run_aai_cmd(" ".join(parts), timeout=600)
+    return _run_aai_cmd(" ".join(parts), timeout=600, quiet=True)
 
 
 @tool
@@ -176,7 +174,7 @@ def optimize_prompt(
         *_hf_dataset_args(hf_dataset, hf_config, audio_column, text_column, split, dataset),
     ]
 
-    return _run_aai_cmd(" ".join(parts), timeout=3600)
+    return _run_aai_cmd(" ".join(parts), timeout=3600, quiet=True)
 
 
 @tool
