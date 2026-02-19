@@ -10,8 +10,9 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from rich.console import Console
 from rich.markdown import Markdown
+from smolagents.memory import FinalAnswerStep, ToolCall
 
-from .agent import create_agent
+from .agent import TOOL_NAMES, create_agent
 from .tools import init_tools
 
 _BANNER = (
@@ -57,6 +58,21 @@ def _cmd_ideas(console: Console) -> None:
     console.print()
 
 
+def _run_streaming(agent, msg: str, console: Console, reset: bool = True) -> str | None:
+    """Run agent with streaming to show tool names before execution."""
+    result = None
+    for event in agent.run(msg, stream=True, reset=reset):
+        if isinstance(event, ToolCall) and event.name == "python_interpreter":
+            code = event.arguments if isinstance(event.arguments, str) else ""
+            for name in TOOL_NAMES:
+                if name in code:
+                    console.print(f"\n⏺ {name}", style="dim")
+                    break
+        if isinstance(event, FinalAnswerStep):
+            result = event.output
+    return result
+
+
 _COMMANDS: dict[str, Callable[[Console], None]] = {
     "/clear": _cmd_clear,
     "/help": _cmd_help,
@@ -87,10 +103,11 @@ def run_agent(extra_args: list[str] | None = None) -> None:
         first_msg = " ".join(extra_args)
         console.print(f"  > {first_msg}", style="dim")
         try:
-            result = agent.run(first_msg)
-            console.print()
-            console.print(Markdown(str(result)))
-            console.print()
+            result = _run_streaming(agent, first_msg, console)
+            if result:
+                console.print()
+                console.print(Markdown(str(result)))
+                console.print()
         except KeyboardInterrupt:
             console.print("\n  Interrupted.", style="dim")
         except Exception as e:
@@ -121,10 +138,11 @@ def run_agent(extra_args: list[str] | None = None) -> None:
             continue
 
         try:
-            result = agent.run(user_input, reset=first_turn)
-            console.print()
-            console.print(Markdown(str(result)))
-            console.print()
+            result = _run_streaming(agent, user_input, console, reset=first_turn)
+            if result:
+                console.print()
+                console.print(Markdown(str(result)))
+                console.print()
             first_turn = False
         except KeyboardInterrupt:
             console.print("\n  Interrupted.", style="dim")

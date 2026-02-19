@@ -12,19 +12,37 @@ from smolagents import (
     UserInputTool,
     VisitWebpageTool,
 )
+from smolagents.memory import PlanningStep
 from smolagents.monitoring import LogLevel
 
 from .tools import (
     create_gradio_asr_demo,
+    create_voice_agent,
+    edit_file,
     eval_prompt,
     get_dataset_info,
     optimize_prompt,
+    read_file,
     search_assemblyai_api,
     search_audio_datasets,
+    write_file,
 )
 
 DEFAULT_MODEL = "claude-opus-4-6"
 _PROMPTS_PATH = Path(__file__).parent / "prompts.yaml"
+TOOL_NAMES = [
+    "eval_prompt",
+    "optimize_prompt",
+    "search_audio_datasets",
+    "get_dataset_info",
+    "create_gradio_asr_demo",
+    "create_voice_agent",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "search_assemblyai_api",
+    "final_answer",
+]
 
 SYSTEM_PROMPT = """\
 You are a voice AI coding agent specialized in building applications with AssemblyAI.
@@ -36,12 +54,11 @@ Working directory: {cwd}
 - All generated apps must use the AssemblyAI SDK (`assemblyai` Python package).
 
 # Tool preference order
-- Use the provided tools before writing custom code: eval_prompt for evaluation, optimize_prompt for optimization, create_gradio_asr_demo for app scaffolding.
+- Use the provided tools before writing custom code.
 - Use search_assemblyai_api to look up API features before visiting docs pages.
 - Use search_audio_datasets and get_dataset_info to find datasets before manual web searches.
 
 # Rules
-- When the user asks to build, create, or make an app/demo, use create_gradio_asr_demo first, then customize the generated file if needed.
 - Before modifying any file, read it first to understand its structure.
 - Always use environment variables for API keys, never hardcode them.
 - Do not add comments to generated code unless asked.
@@ -51,6 +68,20 @@ Working directory: {cwd}
 """
 
 
+def _plan_log(step):
+    """Print the plan steps."""
+    from .tools import _console
+
+    if not _console or not hasattr(step, "plan") or not step.plan:
+        return
+    _console.print()
+    for line in step.plan.strip().splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        _console.print(f"  {stripped}", style="dim")
+
+
 def _step_log(step, agent=None):
     """Print a Claude-style bullet summary per agent step."""
     from .tools import _console
@@ -58,10 +89,6 @@ def _step_log(step, agent=None):
     if not _console or not hasattr(step, "step_number"):
         return
 
-    if step.tool_calls:
-        tc = step.tool_calls[0]
-        args = tc.arguments if isinstance(tc.arguments, str) else ""
-        _console.print(f"\n⏺ {tc.name}({args})", style="dim")
     if step.observations:
         skip = {"Execution logs:", "Last output from code snippet:", ""}
         lines = [ln for ln in step.observations.strip().splitlines() if ln.strip() not in skip]
@@ -114,6 +141,10 @@ def create_agent(anthropic_key: str, console: Console, cwd: str) -> CodeAgent:
         search_audio_datasets,
         get_dataset_info,
         create_gradio_asr_demo,
+        create_voice_agent,
+        read_file,
+        write_file,
+        edit_file,
         search_assemblyai_api,
         DuckDuckGoSearchTool(),
         VisitWebpageTool(),
@@ -142,6 +173,9 @@ def create_agent(anthropic_key: str, console: Console, cwd: str) -> CodeAgent:
         stream_outputs=False,
         max_print_outputs_length=30000,
         verbosity_level=LogLevel.OFF,
-        step_callbacks=[_step_log, _prune_old_steps],
+        step_callbacks={
+            PlanningStep: [_plan_log],
+            ActionStep: [_step_log, _prune_old_steps],
+        },
         final_answer_checks=[_check_answer],
     )

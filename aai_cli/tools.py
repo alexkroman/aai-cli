@@ -324,6 +324,134 @@ def create_gradio_asr_demo(
     )
 
 
+_VOICE_AGENT_TEMPLATE_PATH = Path(__file__).parent / "templates" / "voice_agent.py.tmpl"
+
+
+@tool
+def create_voice_agent(
+    title: str = "AssemblyAI Voice Agent",
+    description: str = "Talk to an AI assistant powered by AssemblyAI, Claude, and Rime.",
+    system_prompt: str = "You are a helpful voice assistant. Keep responses brief - 1-2 sentences.",
+    rime_speaker: str = "celeste",
+    rime_model: str = "arcana",
+    output_path: str = "voice_agent.py",
+) -> str:
+    """Build a real-time voice agent app (FastAPI + WebSocket) and write it to disk.
+
+    Generates a complete Python file that runs a conversational voice agent pipeline:
+    browser mic → AssemblyAI streaming STT → Claude LLM → Rime TTS → audio playback.
+
+    Use this tool when the user asks to:
+    - Build a voice agent, voice assistant, or conversational AI
+    - Create a real-time speech-to-speech app or demo
+    - Build something with streaming transcription and TTS
+    - Make a talk-to-AI or voice chat application
+
+    After generating the app, you can further customize the written file if needed.
+
+    Args:
+        title: Title shown in the browser tab and page header.
+        description: Subtitle shown below the title.
+        system_prompt: System prompt for the Claude LLM that controls assistant personality.
+        rime_speaker: Rime TTS voice to use (default: "celeste").
+        rime_model: Rime TTS model to use (default: "arcana").
+        output_path: File path to write the app to (default: "voice_agent.py").
+    """
+    template = _VOICE_AGENT_TEMPLATE_PATH.read_text()
+    app_code = template.format(
+        title=title,
+        description=description,
+        system_prompt=system_prompt,
+        rime_speaker=rime_speaker,
+        rime_model=rime_model,
+    )
+
+    out = Path(_cwd) / output_path
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(app_code)
+
+    req_path = out.parent / "requirements.txt"
+    req_path.write_text("assemblyai>=0.30\nanthropic>=0.40\nfastapi\nuvicorn[standard]\n")
+
+    return (
+        f"Wrote voice agent to {out}\n"
+        f"Wrote {req_path}\n\n"
+        f"Run it with:\n"
+        f"  pip install -r requirements.txt\n"
+        f"  ASSEMBLYAI_API_KEY=... ANTHROPIC_API_KEY=... RIME_API_KEY=... python {output_path}"
+    )
+
+
+@tool
+def edit_file(file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+    """Replace an exact string match in a file with new content.
+
+    Reads the file, finds old_string, replaces it with new_string, and writes back.
+    By default old_string must appear exactly once to avoid ambiguous edits.
+    Set replace_all=True to replace every occurrence (useful for renaming).
+
+    Use this to make targeted edits to existing files without rewriting them entirely.
+
+    Args:
+        file_path: Path to the file to edit (relative to working directory).
+        old_string: The exact text to find and replace.
+        new_string: The replacement text.
+        replace_all: If True, replace all occurrences. If False (default), old_string must be unique.
+    """
+    path = Path(_cwd) / file_path
+    if not path.is_file():
+        return f"Error: {file_path} not found."
+
+    content = path.read_text()
+    count = content.count(old_string)
+    if count == 0:
+        return f"Error: old_string not found in {file_path}."
+    if not replace_all and count > 1:
+        return f"Error: old_string appears {count} times in {file_path}. Use replace_all=True or provide a more specific match."
+
+    if replace_all:
+        new_content = content.replace(old_string, new_string)
+    else:
+        new_content = content.replace(old_string, new_string, 1)
+    path.write_text(new_content)
+    return f"Edited {file_path}: replaced {count} occurrence(s)."
+
+
+@tool
+def read_file(file_path: str) -> str:
+    """Read and return the contents of a file.
+
+    Use this before editing a file to understand its current content and structure.
+
+    Args:
+        file_path: Path to the file to read (relative to working directory).
+    """
+    path = Path(_cwd) / file_path
+    if not path.is_file():
+        return f"Error: {file_path} not found."
+    content = path.read_text()
+    lines = content.splitlines()
+    numbered = [f"{i + 1:4d} | {line}" for i, line in enumerate(lines)]
+    return "\n".join(numbered)
+
+
+@tool
+def write_file(file_path: str, content: str) -> str:
+    """Create or overwrite a file with the given content.
+
+    Use this to create new files from scratch. Parent directories are created
+    automatically. For targeted changes to existing files, prefer edit_file instead.
+
+    Args:
+        file_path: Path to write to (relative to working directory).
+        content: The full file content to write.
+    """
+    path = Path(_cwd) / file_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return f"Wrote {file_path} ({len(content)} bytes)."
+
+
 _OPENAPI_SPEC_URL = (
     "https://raw.githubusercontent.com/AssemblyAI/assemblyai-api-spec/main/openapi.yml"
 )
