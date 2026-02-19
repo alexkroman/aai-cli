@@ -2,7 +2,7 @@
 
 from unittest.mock import patch
 
-from aai_cli.optimizer import ASRModule, _audio_store, wer_metric
+from aai_cli.optimizer import ASRModule, _audio_store, laser_metric, wer_metric
 
 
 def _mock_example(reference):
@@ -36,6 +36,20 @@ def testwer_metric_wrong():
 
 def testwer_metric_empty_reference():
     assert wer_metric(_mock_example(""), _mock_pred("anything")) == 1.0
+
+
+@patch("aai_cli.optimizer.compute_laser_score")
+def test_laser_metric(mock_laser):
+    mock_laser.return_value = {"laser_score": 0.85, "word_count": 5}
+    score = laser_metric(_mock_example("hello world"), _mock_pred("hello world"))
+    assert score == 0.85
+
+
+@patch("aai_cli.optimizer.compute_laser_score")
+def test_laser_metric_low(mock_laser):
+    mock_laser.return_value = {"laser_score": 0.2, "word_count": 5}
+    score = laser_metric(_mock_example("turn left"), _mock_pred("turn right"))
+    assert score == 0.2
 
 
 @patch("aai_cli.optimizer.transcribe_assemblyai")

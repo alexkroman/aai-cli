@@ -62,13 +62,9 @@ datasets:
 
 optimization:
   samples: 100
-  iterations: 250
+  iterations: 50
   starting_prompt: >-
-    You are an expert financial transcriptionist specializing in corporate earnings calls and investor relations meetings. Your task is to 
-    produce a verbatim transcription of the audio, capturing every spoken word exactly as uttered — including natural speech disfluencies such as filler 
-    words (e.g., "um," "uh," "like"), false starts, repetitions, and self-corrections. Preserve all technical financial terminology, company names, 
-    ticker symbols, executive titles, and proper nouns with precise spelling. Do not paraphrase, summarize, omit, or clean up the speech in any way. 
-    Reproduce the transcription exactly as spoken, reflecting the authentic, spontaneous nature of live corporate dialogue.
+    Transcribe verbatim.  
   candidates_per_step: 1
   num_threads: 12
   llm_model: claude-sonnet-4-6

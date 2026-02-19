@@ -13,7 +13,7 @@ from huggingface_hub import login as hf_login
 from omegaconf import DictConfig, OmegaConf
 from rich.console import Console
 
-from .eval import compute_wer
+from .eval import compute_laser_score, compute_wer
 from .optimizer import run_optimization
 from .streaming import is_streaming_model, transcribe_streaming
 from .transcribe import transcribe_assemblyai
@@ -155,7 +155,7 @@ def _latency_stats(values: list[float]) -> str:
     return f"avg {avg:.2f}s | P95 {s[p95_idx]:.2f}s | Min {s[0]:.2f}s | Max {s[-1]:.2f}s"
 
 
-def run_eval(cfg: DictConfig, aai_key: str, hf_token: str) -> None:
+def run_eval(cfg: DictConfig, aai_key: str, hf_token: str, laser: bool = False) -> None:
     """Run evaluation: transcribe samples and report TTFB, TTFS, and WER."""
     console.print("Loading datasets...")
     samples = load_all_datasets(cfg, hf_token, total_samples=cfg.eval.max_samples)
@@ -168,8 +168,10 @@ def run_eval(cfg: DictConfig, aai_key: str, hf_token: str) -> None:
     api_host = cfg.eval.get("api_host", None)
 
     console.print(f'[bold]Evaluating with prompt:[/bold] "{prompt}"')
+    metrics_label = "WER + LASER" if laser else "WER"
     console.print(
-        f"[dim]Model: {speech_model} ({api_mode}), Samples: {len(samples)}, Threads: {num_threads}[/dim]"
+        f"[dim]Model: {speech_model} ({api_mode}), Samples: {len(samples)}, "
+        f"Threads: {num_threads}, Metrics: {metrics_label}[/dim]"
     )
     if api_host:
         console.print(f"[dim]API host: {api_host}[/dim]")
@@ -182,12 +184,15 @@ def run_eval(cfg: DictConfig, aai_key: str, hf_token: str) -> None:
         else:
             result = transcribe_assemblyai(sample["audio"], prompt, aai_key)
         wer = compute_wer(sample["reference"], result["text"])
-        return {
+        out = {
             **result,
             "wer": wer,
             "reference": sample["reference"],
             "dataset": sample.get("dataset", ""),
         }
+        if laser:
+            out["laser"] = compute_laser_score(sample["reference"], result["text"])
+        return out
 
     results: list[dict] = []
     with ThreadPoolExecutor(max_workers=num_threads) as pool:
@@ -203,11 +208,30 @@ def run_eval(cfg: DictConfig, aai_key: str, hf_token: str) -> None:
                 latency_parts.append(f"TTFS {r['ttfs']:.2f}s")
             latency_str = " | ".join(latency_parts) if latency_parts else ""
             ds_tag = f" ({r['dataset']})" if r["dataset"] else ""
-            console.print(
-                f"[dim][{i}/{len(samples)}]{ds_tag} WER: {wer_pct:.1f}% | {latency_str}[/dim]"
-            )
+            if laser:
+                ls = r["laser"]
+                laser_pct = (1.0 - ls["laser_score"]) * 100.0
+                console.print(
+                    f"[dim][{i}/{len(samples)}]{ds_tag} WER: {wer_pct:.1f}% | "
+                    f"LASER: {laser_pct:.1f}% | {latency_str}[/dim]"
+                )
+            else:
+                console.print(
+                    f"[dim][{i}/{len(samples)}]{ds_tag} WER: {wer_pct:.1f}% | {latency_str}[/dim]"
+                )
             console.print(f"  [green]REF:[/green] {r['reference']}")
             console.print(f"  [yellow]HYP:[/yellow] {r['text']}")
+            if laser:
+                ls = r["laser"]
+                parts = []
+                if ls["major_errors"]:
+                    parts.append(f"[red]Major: {ls['major_errors']}[/red]")
+                if ls["minor_errors"]:
+                    parts.append(f"[yellow]Minor: {ls['minor_errors']}[/yellow]")
+                if ls["no_penalty_errors"]:
+                    parts.append(f"[green]No penalty: {ls['no_penalty_errors']}[/green]")
+                if parts:
+                    console.print(f"  {' | '.join(parts)}")
 
     wer_values = [r["wer"] for r in results]
     avg_wer = sum(wer_values) / len(wer_values) * 100.0
@@ -221,17 +245,27 @@ def run_eval(cfg: DictConfig, aai_key: str, hf_token: str) -> None:
     if ttfs_values:
         console.print(f"[bold]TTFS:[/bold] {_latency_stats(ttfs_values)}")
 
-    # Per-dataset WER breakdown when multiple datasets are used
+    # Per-dataset breakdown when multiple datasets are used
     datasets_seen = sorted({r["dataset"] for r in results if r["dataset"]})
     if len(datasets_seen) > 1:
         for ds_name in datasets_seen:
-            ds_wers = [r["wer"] for r in results if r["dataset"] == ds_name]
+            ds_results = [r for r in results if r["dataset"] == ds_name]
+            ds_wers = [r["wer"] for r in ds_results]
             ds_avg = sum(ds_wers) / len(ds_wers) * 100.0
-            console.print(f"[bold]WER ({ds_name}): {ds_avg:.2f}%[/bold] | Samples: {len(ds_wers)}")
+            line = f"[bold]WER ({ds_name}): {ds_avg:.2f}%[/bold] | Samples: {len(ds_wers)}"
+            if laser:
+                ds_laser = (
+                    1.0 - sum(r["laser"]["laser_score"] for r in ds_results) / len(ds_results)
+                ) * 100.0
+                line += f" | LASER: {ds_laser:.2f}%"
+            console.print(line)
 
     console.print(
         f"[bold]WER: {avg_wer:.2f}%[/bold] | Model: {speech_model} ({api_mode}) | Samples: {len(samples)}"
     )
+    if laser:
+        avg_laser = (1.0 - sum(r["laser"]["laser_score"] for r in results) / len(results)) * 100.0
+        console.print(f"[bold]LASER: {avg_laser:.2f}%[/bold]")
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +293,7 @@ def optimize_cmd(
     text_column: str | None = typer.Option("text", help="Text/reference column name"),
     split: str | None = typer.Option("test", help="Dataset split"),
     config: Path | None = typer.Option(None, help="Alternate config YAML"),
+    laser: bool = typer.Option(False, "--laser", help="Optimize using LASER metric instead of WER"),
 ):
     """Run OPRO prompt optimization."""
     _suppress_loggers()
@@ -305,6 +340,7 @@ def optimize_cmd(
         llm_model=cfg.optimization.llm_model,
         num_threads=cfg.optimization.num_threads,
         output_path=output,
+        laser=laser,
     )
 
     result["datasets"] = list(cfg.datasets.keys())
@@ -343,6 +379,9 @@ def eval_cmd(
     text_column: str | None = typer.Option("text", help="Text/reference column name"),
     split: str | None = typer.Option("test", help="Dataset split"),
     config: Path | None = typer.Option(None, help="Alternate config YAML"),
+    laser: bool = typer.Option(
+        False, "--laser", help="Compute LASER score (LLM-based rubric) alongside WER"
+    ),
 ):
     """Evaluate a transcription prompt (WER)."""
     _suppress_loggers()
@@ -374,7 +413,7 @@ def eval_cmd(
     aai_key = get_env_key("ASSEMBLYAI_API_KEY")
     hf_token = get_env_key("HF_TOKEN")
 
-    run_eval(cfg, aai_key, hf_token)
+    run_eval(cfg, aai_key, hf_token, laser=laser)
 
 
 def launch_agent(extra_args: list[str]) -> None:

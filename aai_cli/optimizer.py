@@ -10,7 +10,7 @@ import dspy
 from rich.console import Console
 from rich.markdown import Markdown
 
-from .eval import compute_wer
+from .eval import compute_laser_score, compute_wer
 from .streaming import is_streaming_model, transcribe_streaming
 from .transcribe import transcribe_assemblyai
 
@@ -40,8 +40,15 @@ class ASRModule(dspy.Module):
         self.speech_model = speech_model
         self.api_host = api_host
 
+    _last_prompt = None
+    _console = None
+
     def forward(self, audio_id):
         prompt = self.predict.signature.instructions
+        if prompt != ASRModule._last_prompt:
+            ASRModule._last_prompt = prompt
+            if ASRModule._console:
+                ASRModule._console.print(f"[dim]Prompt: {prompt}[/dim]")
         aid = int(audio_id)
         audio = _audio_store[aid]
         t0 = time.monotonic()
@@ -62,6 +69,14 @@ def wer_metric(example, pred, trace=None):
     return max(0.0, 1.0 - compute_wer(ref, hyp))
 
 
+def laser_metric(example, pred, trace=None):
+    """DSPy metric: LASER score (0-1, higher is better)."""
+    ref = getattr(example, "reference", "") or ""
+    hyp = getattr(pred, "transcription", "") or ""
+    result = compute_laser_score(ref, hyp)
+    return result["laser_score"]
+
+
 def run_optimization(
     eval_samples: list[dict],
     api_key: str,
@@ -72,17 +87,22 @@ def run_optimization(
     llm_model: str = "claude-sonnet-4-6",
     num_threads: int = 12,
     output_path: str | None = None,
+    laser: bool = False,
     **_kwargs,
 ) -> dict:
     """Run MIPROv2 prompt optimization and return results dict."""
     lm = dspy.LM(f"anthropic/{llm_model}")
     dspy.configure(lm=lm)
 
+    metric = laser_metric if laser else wer_metric
+    metric_name = "LASER" if laser else "WER"
     num_trials = iterations * candidates_per_step
 
     console.print(Markdown("## Starting Optimization (DSPy MIPROv2)"))
     console.print(
-        Markdown(f"*Samples: {len(eval_samples)}, Trials: {num_trials}, LLM: {llm_model}*")
+        Markdown(
+            f"*Samples: {len(eval_samples)}, Trials: {num_trials}, LLM: {llm_model}, Metric: {metric_name}*"
+        )
     )
 
     # Populate audio store and build lightweight trainset
@@ -92,13 +112,15 @@ def run_optimization(
         _audio_store[i] = s["audio"]
         trainset.append(dspy.Example(audio_id=i, reference=s["reference"]).with_inputs("audio_id"))
 
+    ASRModule._console = console
+    ASRModule._last_prompt = None
     student = ASRModule(api_key)
     student.predict.signature = student.predict.signature.with_instructions(starting_prompt)
 
     num_candidates = max(candidates_per_step, 5)
 
     optimizer = dspy.MIPROv2(
-        metric=wer_metric,
+        metric=metric,
         auto=None,
         num_candidates=num_candidates,
         num_threads=num_threads,
@@ -121,13 +143,21 @@ def run_optimization(
 
     # Final evaluation pass
     console.print(Markdown("**Running final evaluation...**"))
-    scores = [wer_metric(ex, optimized(audio_id=ex.audio_id)) for ex in trainset]
-    best_wer = 1.0 - (sum(scores) / len(scores)) if scores else 1.0
-    console.print(Markdown(f"**Best WER: {best_wer * 100:.2f}%**"))
+    scores = [metric(ex, optimized(audio_id=ex.audio_id)) for ex in trainset]
+    avg_score = sum(scores) / len(scores) if scores else 0.0
+    if laser:
+        # LASER: score is 0-1 (higher=better), display as error rate
+        best_err = (1.0 - avg_score) * 100.0
+        console.print(Markdown(f"**Best LASER: {best_err:.2f}%**"))
+    else:
+        # WER metric returns 1-WER, so WER = 1 - score
+        best_wer = 1.0 - avg_score
+        console.print(Markdown(f"**Best WER: {best_wer * 100:.2f}%**"))
 
     result = {
         "best_prompt": best_prompt,
-        "best_wer": best_wer,
+        "best_score": avg_score,
+        "metric": metric_name,
         "starting_prompt": starting_prompt,
         "model": "assemblyai/universal-3-pro",
         "total_eval_samples": len(eval_samples),
