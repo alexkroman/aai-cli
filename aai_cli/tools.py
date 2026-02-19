@@ -108,7 +108,7 @@ def eval_prompt(
         max_samples: Number of audio samples to transcribe (default: 10 for quick test, use 50+ for reliable results).
         num_threads: Parallel transcription threads (default: 12).
         speech_model: Speech model to use. Batch: "universal-3-pro" (default). Streaming: "u3-pro", "universal-streaming-english", "universal-streaming-multilingual".
-        dataset: Preconfigured dataset shortcut. One of "earnings22", "peoples", "ami", or "all" (default). Ignored when hf_dataset is set.
+        dataset: Preconfigured dataset shortcut. One of "earnings22", "peoples", "ami", "loquacious", "gigaspeech", "tedlium", "commonvoice", "librispeech", "librispeech-other", or "all" (default). Ignored when hf_dataset is set.
         hf_dataset: Any HF audio dataset path (e.g. "mozilla-foundation/common_voice_11_0"). Overrides dataset.
         hf_config: HF dataset config/subset name (default: "default").
         audio_column: Name of the audio column in the dataset (default: "audio").
@@ -159,7 +159,7 @@ def optimize_prompt(
         candidates_per_step: Number of candidate prompts generated per iteration (default: 1).
         num_threads: Parallel transcription threads (default: 12).
         llm_model: Model used to generate candidate prompts. Leave empty to use config default.
-        dataset: Preconfigured dataset shortcut. One of "earnings22", "peoples", "ami", or "all" (default). Ignored when hf_dataset is set.
+        dataset: Preconfigured dataset shortcut. One of "earnings22", "peoples", "ami", "loquacious", "gigaspeech", "tedlium", "commonvoice", "librispeech", "librispeech-other", or "all" (default). Ignored when hf_dataset is set.
         hf_dataset: Any HF audio dataset path (e.g. "mozilla-foundation/common_voice_11_0"). Overrides dataset.
         hf_config: HF dataset config/subset name (default: "default").
         audio_column: Name of the audio column in the dataset (default: "audio").

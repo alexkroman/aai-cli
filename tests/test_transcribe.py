@@ -25,11 +25,16 @@ def test_transcribe_success(_mock_aai):
     transcript = MagicMock(text="hello world")
     _mock_aai.Transcriber.return_value.transcribe.return_value = transcript
 
-    assert transcribe_assemblyai(FAKE_AUDIO, "Transcribe verbatim", "fake-key") == "hello world"
+    result = transcribe_assemblyai(FAKE_AUDIO, "Transcribe verbatim", "fake-key")
+    assert result["text"] == "hello world"
+    assert result["ttfb"] is None
+    assert isinstance(result["ttfs"], float)
 
 
 def test_transcribe_error(_mock_aai):
     _mock_aai.Transcriber.return_value.transcribe.side_effect = RuntimeError("API down")
 
     result = transcribe_assemblyai(FAKE_AUDIO, "Transcribe verbatim", "fake-key")
-    assert "[transcription error:" in result
+    assert "[transcription error:" in result["text"]
+    assert result["ttfb"] is None
+    assert isinstance(result["ttfs"], float)

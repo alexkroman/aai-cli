@@ -46,13 +46,13 @@ class ASRModule(dspy.Module):
         audio = _audio_store[aid]
         t0 = time.monotonic()
         if is_streaming_model(self.speech_model):
-            hyp = transcribe_streaming(
+            result = transcribe_streaming(
                 audio, prompt, self.api_key, speech_model=self.speech_model, api_host=self.api_host
             )
         else:
-            hyp = transcribe_assemblyai(audio, prompt, self.api_key)
+            result = transcribe_assemblyai(audio, prompt, self.api_key)
         _latency_store[aid] = time.monotonic() - t0
-        return dspy.Prediction(transcription=hyp)
+        return dspy.Prediction(transcription=result["text"])
 
 
 def wer_metric(example, pred, trace=None):

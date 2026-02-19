@@ -62,17 +62,21 @@ def transcribe_streaming(
     api_key: str,
     speech_model: str = "u3-pro",
     api_host: str | None = None,
-) -> str:
+) -> dict:
     """Transcribe audio using the AssemblyAI streaming API.
 
     Uses the v3 WebSocket client. Audio is converted to raw PCM s16le at 16kHz
     and streamed in small chunks to simulate real-time delivery.
+
+    Returns {"text": str, "ttfb": float, "ttfs": float}.
     """
     pcm_bytes = _audio_to_pcm_s16le(audio)
 
     transcripts: list[str] = []
     error: list[str] = []
     done = threading.Event()
+    ttfb_val: list[float] = []  # capture first-turn latency
+    ttfs_val: list[float] = []  # capture last end_of_turn time
 
     opts = StreamingClientOptions(api_key=api_key)
     if api_host:
@@ -80,8 +84,11 @@ def transcribe_streaming(
     client = StreamingClient(opts)
 
     def on_turn(_client, turn):
+        if not ttfb_val:
+            ttfb_val.append(time.monotonic())
         if turn.end_of_turn:
             transcripts.append(turn.transcript)
+            ttfs_val.append(time.monotonic())
 
     def on_error(_client, err):
         error.append(str(err))
@@ -103,6 +110,8 @@ def transcribe_streaming(
             params.prompt = prompt
         client.connect(params)
 
+        t0 = time.monotonic()
+
         # Stream in ~100ms chunks (3200 bytes at 16kHz/16-bit)
         chunk_size = 3200
         for i in range(0, len(pcm_bytes), chunk_size):
@@ -112,9 +121,12 @@ def transcribe_streaming(
         client.disconnect(terminate=True)
         done.wait(timeout=30)
     except Exception as e:
-        return f"[streaming transcription error: {e}]"
+        return {"text": f"[streaming transcription error: {e}]", "ttfb": None, "ttfs": None}
 
     if error:
-        return f"[streaming transcription error: {error[0]}]"
+        return {"text": f"[streaming transcription error: {error[0]}]", "ttfb": None, "ttfs": None}
 
-    return " ".join(transcripts)
+    ttfs = ttfs_val[-1] - t0 if ttfs_val else None
+    ttfb = ttfb_val[0] - t0 if ttfb_val else None
+
+    return {"text": " ".join(transcripts), "ttfb": ttfb, "ttfs": ttfs}

@@ -4,17 +4,19 @@ import json
 import logging
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import dspy
 import typer
 from datasets import Audio, load_dataset
 from huggingface_hub import login as hf_login
 from omegaconf import DictConfig, OmegaConf
 from rich.console import Console
 
-from .optimizer import ASRModule, _audio_store, _latency_store, run_optimization, wer_metric
-from .streaming import is_streaming_model
+from .eval import compute_wer
+from .optimizer import run_optimization
+from .streaming import is_streaming_model, transcribe_streaming
+from .transcribe import transcribe_assemblyai
 
 console = Console()
 
@@ -135,6 +137,8 @@ def load_all_datasets(
     for i, name in enumerate(ds_names):
         n = per_ds + (1 if i < remainder else 0)
         samples = load_dataset_samples(name, cfg.datasets[name], n, hf_token)
+        for s in samples:
+            s["dataset"] = name
         all_samples.extend(samples)
 
     console.print(
@@ -143,55 +147,90 @@ def load_all_datasets(
     return all_samples
 
 
+def _latency_stats(values: list[float]) -> str:
+    """Format avg/P95/min/max for a list of latency values."""
+    s = sorted(values)
+    avg = sum(s) / len(s)
+    p95_idx = min(int(len(s) * 0.95), len(s) - 1)
+    return f"avg {avg:.2f}s | P95 {s[p95_idx]:.2f}s | Min {s[0]:.2f}s | Max {s[-1]:.2f}s"
+
+
 def run_eval(cfg: DictConfig, aai_key: str, hf_token: str) -> None:
-    """Run evaluation: transcribe samples and report WER."""
+    """Run evaluation: transcribe samples and report TTFB, TTFS, and WER."""
     console.print("Loading datasets...")
     samples = load_all_datasets(cfg, hf_token, total_samples=cfg.eval.max_samples)
 
     prompt = cfg.eval.prompt
     num_threads = cfg.eval.num_threads
     speech_model = cfg.eval.speech_model
-    api_mode = "streaming" if is_streaming_model(speech_model) else "batch"
+    streaming = is_streaming_model(speech_model)
+    api_mode = "streaming" if streaming else "batch"
+    api_host = cfg.eval.get("api_host", None)
+
     console.print(f'[bold]Evaluating with prompt:[/bold] "{prompt}"')
     console.print(
         f"[dim]Model: {speech_model} ({api_mode}), Samples: {len(samples)}, Threads: {num_threads}[/dim]"
     )
-
-    _audio_store.clear()
-    _latency_store.clear()
-    trainset = []
-    for i, s in enumerate(samples):
-        _audio_store[i] = s["audio"]
-        trainset.append(dspy.Example(audio_id=i, reference=s["reference"]).with_inputs("audio_id"))
-
-    api_host = cfg.eval.get("api_host", None)
     if api_host:
         console.print(f"[dim]API host: {api_host}[/dim]")
-    student = ASRModule(aai_key, speech_model=speech_model, api_host=api_host)
-    student.predict.signature = student.predict.signature.with_instructions(prompt)
 
-    result = dspy.Evaluate(
-        devset=trainset,
-        metric=wer_metric,
-        num_threads=num_threads,
-        display_progress=True,
-    )(student)
+    def _transcribe(sample: dict) -> dict:
+        if streaming:
+            result = transcribe_streaming(
+                sample["audio"], prompt, aai_key, speech_model=speech_model, api_host=api_host
+            )
+        else:
+            result = transcribe_assemblyai(sample["audio"], prompt, aai_key)
+        wer = compute_wer(sample["reference"], result["text"])
+        return {
+            **result,
+            "wer": wer,
+            "reference": sample["reference"],
+            "dataset": sample.get("dataset", ""),
+        }
 
-    wer_pct = 100.0 - result.score
+    results: list[dict] = []
+    with ThreadPoolExecutor(max_workers=num_threads) as pool:
+        futures = {pool.submit(_transcribe, s): i for i, s in enumerate(samples)}
+        for i, future in enumerate(as_completed(futures), 1):
+            r = future.result()
+            results.append(r)
+            wer_pct = r["wer"] * 100.0
+            latency_parts = []
+            if r["ttfb"] is not None:
+                latency_parts.append(f"TTFB {r['ttfb']:.2f}s")
+            if r["ttfs"] is not None:
+                latency_parts.append(f"TTFS {r['ttfs']:.2f}s")
+            latency_str = " | ".join(latency_parts) if latency_parts else ""
+            ds_tag = f" ({r['dataset']})" if r["dataset"] else ""
+            console.print(
+                f"[dim][{i}/{len(samples)}]{ds_tag} WER: {wer_pct:.1f}% | {latency_str}[/dim]"
+            )
+            console.print(f"  [green]REF:[/green] {r['reference']}")
+            console.print(f"  [yellow]HYP:[/yellow] {r['text']}")
 
-    # Latency report
-    latencies = [_latency_store[i] for i in sorted(_latency_store)]
-    if latencies:
-        avg_lat = sum(latencies) / len(latencies)
-        sorted_lat = sorted(latencies)
-        p95_idx = min(int(len(sorted_lat) * 0.95), len(sorted_lat) - 1)
-        p95_lat = sorted_lat[p95_idx]
-        console.print(
-            f"\n[bold]Avg latency: {avg_lat:.2f}s[/bold] | P95: {p95_lat:.2f}s | Min: {min(latencies):.2f}s | Max: {max(latencies):.2f}s"
-        )
+    wer_values = [r["wer"] for r in results]
+    avg_wer = sum(wer_values) / len(wer_values) * 100.0
+
+    ttfb_values = [r["ttfb"] for r in results if r["ttfb"] is not None]
+    ttfs_values = [r["ttfs"] for r in results if r["ttfs"] is not None]
+
+    console.print()
+    if ttfb_values:
+        console.print(f"[bold]TTFB:[/bold] {_latency_stats(ttfb_values)}")
+    if ttfs_values:
+        console.print(f"[bold]TTFS:[/bold] {_latency_stats(ttfs_values)}")
+
+    # Per-dataset WER breakdown when multiple datasets are used
+    datasets_seen = sorted({r["dataset"] for r in results if r["dataset"]})
+    if len(datasets_seen) > 1:
+        for ds_name in datasets_seen:
+            ds_wers = [r["wer"] for r in results if r["dataset"] == ds_name]
+            ds_avg = sum(ds_wers) / len(ds_wers) * 100.0
+            console.print(f"[bold]WER ({ds_name}): {ds_avg:.2f}%[/bold] | Samples: {len(ds_wers)}")
 
     console.print(
-        f'[bold]WER: {wer_pct:.2f}%[/bold] | Model: {speech_model} ({api_mode}) | Samples: {len(samples)} | Prompt: "{prompt}"'
+        f"[bold]WER: {avg_wer:.2f}%[/bold] | Model: {speech_model} ({api_mode}) | Samples: {len(samples)}"
     )
 
 

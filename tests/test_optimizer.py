@@ -41,7 +41,7 @@ def testwer_metric_empty_reference():
 @patch("aai_cli.optimizer.transcribe_assemblyai")
 def test_asr_module_forward(mock_transcribe):
     """ASRModule.forward should look up audio from _audio_store and call transcribe."""
-    mock_transcribe.return_value = "hello world"
+    mock_transcribe.return_value = {"text": "hello world", "ttfb": None, "ttfs": 1.0}
     _audio_store[0] = {"path": "test.wav"}
 
     module = ASRModule(api_key="test-key")
