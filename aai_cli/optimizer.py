@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +18,7 @@ logging.getLogger("dspy").setLevel(logging.WARNING)
 
 # Side-channel for audio data so DSPy never serializes it to the LLM.
 _audio_store: dict[int, dict] = {}
+_latency_store: dict[int, float] = {}  # audio_id -> seconds
 
 
 class Transcribe(dspy.Signature):
@@ -29,19 +31,27 @@ class Transcribe(dspy.Signature):
 class ASRModule(dspy.Module):
     """Wrapper that routes DSPy instruction optimization to AssemblyAI."""
 
-    def __init__(self, api_key: str, speech_model: str = "universal-3-pro"):
+    def __init__(
+        self, api_key: str, speech_model: str = "universal-3-pro", api_host: str | None = None
+    ):
         super().__init__()
         self.predict = dspy.Predict(Transcribe)
         self.api_key = api_key
         self.speech_model = speech_model
+        self.api_host = api_host
 
     def forward(self, audio_id):
         prompt = self.predict.signature.instructions
-        audio = _audio_store[int(audio_id)]
+        aid = int(audio_id)
+        audio = _audio_store[aid]
+        t0 = time.monotonic()
         if is_streaming_model(self.speech_model):
-            hyp = transcribe_streaming(audio, prompt, self.api_key, speech_model=self.speech_model)
+            hyp = transcribe_streaming(
+                audio, prompt, self.api_key, speech_model=self.speech_model, api_host=self.api_host
+            )
         else:
             hyp = transcribe_assemblyai(audio, prompt, self.api_key)
+        _latency_store[aid] = time.monotonic() - t0
         return dspy.Prediction(transcription=hyp)
 
 

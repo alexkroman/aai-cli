@@ -13,7 +13,7 @@ from huggingface_hub import login as hf_login
 from omegaconf import DictConfig, OmegaConf
 from rich.console import Console
 
-from .optimizer import ASRModule, _audio_store, run_optimization, wer_metric
+from .optimizer import ASRModule, _audio_store, _latency_store, run_optimization, wer_metric
 from .streaming import is_streaming_model
 
 console = Console()
@@ -158,12 +158,16 @@ def run_eval(cfg: DictConfig, aai_key: str, hf_token: str) -> None:
     )
 
     _audio_store.clear()
+    _latency_store.clear()
     trainset = []
     for i, s in enumerate(samples):
         _audio_store[i] = s["audio"]
         trainset.append(dspy.Example(audio_id=i, reference=s["reference"]).with_inputs("audio_id"))
 
-    student = ASRModule(aai_key, speech_model=speech_model)
+    api_host = cfg.eval.get("api_host", None)
+    if api_host:
+        console.print(f"[dim]API host: {api_host}[/dim]")
+    student = ASRModule(aai_key, speech_model=speech_model, api_host=api_host)
     student.predict.signature = student.predict.signature.with_instructions(prompt)
 
     result = dspy.Evaluate(
@@ -174,6 +178,18 @@ def run_eval(cfg: DictConfig, aai_key: str, hf_token: str) -> None:
     )(student)
 
     wer_pct = 100.0 - result.score
+
+    # Latency report
+    latencies = [_latency_store[i] for i in sorted(_latency_store)]
+    if latencies:
+        avg_lat = sum(latencies) / len(latencies)
+        sorted_lat = sorted(latencies)
+        p95_idx = min(int(len(sorted_lat) * 0.95), len(sorted_lat) - 1)
+        p95_lat = sorted_lat[p95_idx]
+        console.print(
+            f"\n[bold]Avg latency: {avg_lat:.2f}s[/bold] | P95: {p95_lat:.2f}s | Min: {min(latencies):.2f}s | Max: {max(latencies):.2f}s"
+        )
+
     console.print(
         f'[bold]WER: {wer_pct:.2f}%[/bold] | Model: {speech_model} ({api_mode}) | Samples: {len(samples)} | Prompt: "{prompt}"'
     )
@@ -273,7 +289,11 @@ def eval_cmd(
     num_threads: int | None = typer.Option(None, help="Parallel threads"),
     speech_model: str | None = typer.Option(
         None,
-        help="Speech model: 'universal-3-pro' (batch API) or 'u3-pro' (streaming API)",
+        help="Speech model: 'universal-3-pro' (batch) or 'u3-pro'/'universal-streaming-english'/'universal-streaming-multilingual' (streaming)",
+    ),
+    api_host: str | None = typer.Option(
+        None,
+        help="Streaming API host override (e.g. streaming.edge.assemblyai.com)",
     ),
     dataset: str | None = typer.Option(None, help="Dataset name or 'all'"),
     hf_dataset: str | None = typer.Option(
@@ -301,6 +321,8 @@ def eval_cmd(
         overrides.setdefault("eval", {})["num_threads"] = num_threads
     if speech_model is not None:
         overrides.setdefault("eval", {})["speech_model"] = speech_model
+    if api_host is not None:
+        overrides.setdefault("eval", {})["api_host"] = api_host
 
     cfg = load_config(overrides or None, cfg_path=config)
     if hf_dataset:

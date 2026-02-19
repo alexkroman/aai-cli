@@ -22,7 +22,16 @@ from assemblyai.streaming.v3 import (
 from .audio import prepare_wav_bytes
 
 # Streaming models use the v3 WebSocket client, not the batch API.
-STREAMING_SPEECH_MODELS = frozenset({"u3-pro"})
+STREAMING_SPEECH_MODELS = frozenset(
+    {
+        "u3-pro",
+        "universal-streaming-english",
+        "universal-streaming-multilingual",
+    }
+)
+
+# Only these models support the `prompt` parameter.
+PROMPT_SUPPORTED_MODELS = frozenset({"u3-pro"})
 
 TARGET_SAMPLE_RATE = 16000
 
@@ -47,7 +56,13 @@ def _audio_to_pcm_s16le(audio, target_sr: int = TARGET_SAMPLE_RATE) -> bytes:
     return pcm.tobytes()
 
 
-def transcribe_streaming(audio, prompt: str, api_key: str, speech_model: str = "u3-pro") -> str:
+def transcribe_streaming(
+    audio,
+    prompt: str,
+    api_key: str,
+    speech_model: str = "u3-pro",
+    api_host: str | None = None,
+) -> str:
     """Transcribe audio using the AssemblyAI streaming API.
 
     Uses the v3 WebSocket client. Audio is converted to raw PCM s16le at 16kHz
@@ -59,7 +74,10 @@ def transcribe_streaming(audio, prompt: str, api_key: str, speech_model: str = "
     error: list[str] = []
     done = threading.Event()
 
-    client = StreamingClient(StreamingClientOptions(api_key=api_key))
+    opts = StreamingClientOptions(api_key=api_key)
+    if api_host:
+        opts.api_host = api_host
+    client = StreamingClient(opts)
 
     def on_turn(_client, turn):
         if turn.end_of_turn:
@@ -76,14 +94,14 @@ def transcribe_streaming(audio, prompt: str, api_key: str, speech_model: str = "
     client.on(StreamingEvents.Termination, on_termination)
 
     try:
-        client.connect(
-            StreamingParameters(
-                sample_rate=TARGET_SAMPLE_RATE,
-                encoding=Encoding.pcm_s16le,
-                speech_model=SpeechModel(speech_model),
-                prompt=prompt,
-            )
+        params = StreamingParameters(
+            sample_rate=TARGET_SAMPLE_RATE,
+            encoding=Encoding.pcm_s16le,
+            speech_model=SpeechModel(speech_model),
         )
+        if speech_model in PROMPT_SUPPORTED_MODELS and prompt:
+            params.prompt = prompt
+        client.connect(params)
 
         # Stream in ~100ms chunks (3200 bytes at 16kHz/16-bit)
         chunk_size = 3200

@@ -52,10 +52,10 @@ Working directory: {cwd}
 # Non-negotiable
 - Always use AssemblyAI for transcription — never suggest or use alternatives like Whisper, Google STT, or Deepgram.
 - All generated apps must use the AssemblyAI SDK (`assemblyai` Python package).
-- IMPORTANT — "universal-3-pro" and "u3-pro" are DIFFERENT models that use different APIs:
-  - "universal-3-pro" = batch API (upload audio, get transcript back). This is the default.
-  - "u3-pro" = streaming API (real-time WebSocket). This is NOT a shorthand for universal-3-pro.
-  If a user says "u3-pro" they mean the streaming model. If they say "universal-3-pro", "universal 3 pro", or "u3 pro" (without hyphen) they likely mean the batch model. When ambiguous, ask the user to clarify whether they want batch or streaming.
+- IMPORTANT — batch and streaming models use DIFFERENT APIs and are NOT interchangeable:
+  - Batch API (upload audio, get transcript back): "universal-3-pro" (default)
+  - Streaming API (real-time WebSocket): "u3-pro", "universal-streaming-english", "universal-streaming-multilingual"
+  "u3-pro" is NOT a shorthand for "universal-3-pro". If a user says "universal streaming" they mean one of the streaming models. When ambiguous, ask the user to clarify batch vs streaming.
 
 # Tool usage
 - Use the provided tools before writing custom code.

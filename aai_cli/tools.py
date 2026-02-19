@@ -93,17 +93,21 @@ def eval_prompt(
     Use this when a user asks to evaluate, test, or benchmark AssemblyAI transcription,
     measure WER, or compare prompt performance.
 
-    IMPORTANT: "universal-3-pro" and "u3-pro" are DIFFERENT models with different APIs.
-    They are NOT interchangeable. "u3-pro" is NOT shorthand for "universal-3-pro".
-    - "universal-3-pro" (default): batch API — uploads audio, gets results back.
-    - "u3-pro": streaming API — sends audio over a WebSocket in real time.
+    IMPORTANT: batch and streaming models use DIFFERENT APIs and are NOT interchangeable.
+    "u3-pro" is NOT shorthand for "universal-3-pro".
+    Batch model (uploads audio, gets results back):
+    - "universal-3-pro" (default)
+    Streaming models (real-time WebSocket):
+    - "u3-pro"
+    - "universal-streaming-english"
+    - "universal-streaming-multilingual"
     When unsure which model the user wants, ask them to clarify batch vs streaming.
 
     Args:
         prompt: The transcription prompt to evaluate (e.g. "Transcribe verbatim.").
         max_samples: Number of audio samples to transcribe (default: 10 for quick test, use 50+ for reliable results).
         num_threads: Parallel transcription threads (default: 12).
-        speech_model: Speech model to use. "universal-3-pro" (batch) or "u3-pro" (streaming). Default: "universal-3-pro".
+        speech_model: Speech model to use. Batch: "universal-3-pro" (default). Streaming: "u3-pro", "universal-streaming-english", "universal-streaming-multilingual".
         dataset: Preconfigured dataset shortcut. One of "earnings22", "peoples", "ami", or "all" (default). Ignored when hf_dataset is set.
         hf_dataset: Any HF audio dataset path (e.g. "mozilla-foundation/common_voice_11_0"). Overrides dataset.
         hf_config: HF dataset config/subset name (default: "default").
