@@ -1,5 +1,3 @@
-mode: optimize  # optimize | eval
-
 eval:
   max_samples: 50
   prompt: "Transcribe verbatim."
@@ -26,22 +24,14 @@ datasets:
     split: test
 
 optimization:
-  samples: 50
-  iterations: 5
+  samples: 100
+  iterations: 250
   starting_prompt: >-
-    Transcribe verbatim.
+    You are an expert financial transcriptionist specializing in corporate earnings calls and investor relations meetings. Your task is to 
+    produce a verbatim transcription of the audio, capturing every spoken word exactly as uttered — including natural speech disfluencies such as filler 
+    words (e.g., "um," "uh," "like"), false starts, repetitions, and self-corrections. Preserve all technical financial terminology, company names, 
+    ticker symbols, executive titles, and proper nouns with precise spelling. Do not paraphrase, summarize, omit, or clean up the speech in any way. 
+    Reproduce the transcription exactly as spoken, reflecting the authentic, spontaneous nature of live corporate dialogue.
   candidates_per_step: 1
-  trajectory_size: 3
-  seed: 42
   num_threads: 12
-  llm_model: claude-sonnet-4-7
-  meta_every: 3  # run meta-optimization every N iterations (0 = disabled)
-
-hydra:
-  output_subdir: null
-  run:
-    dir: .
-  job_logging:
-    handlers:
-      file:
-        filename: /dev/null
+  llm_model: claude-sonnet-4-6

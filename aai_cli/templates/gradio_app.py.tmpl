@@ -1,0 +1,49 @@
+"""Gradio ASR demo powered by AssemblyAI."""
+
+import os
+
+import assemblyai as aai
+import gradio as gr
+
+aai.settings.api_key = os.environ.get("ASSEMBLYAI_API_KEY", "")
+
+
+def transcribe(audio_path: str, prompt: str) -> str:
+    """Transcribe an audio file with AssemblyAI universal-3-pro."""
+    if not audio_path:
+        return "No audio provided."
+    if not aai.settings.api_key:
+        return "Error: set the ASSEMBLYAI_API_KEY environment variable."
+
+    config = aai.TranscriptionConfig(
+        speech_models=["universal-3-pro"],
+    )
+    if prompt.strip():
+        config.set_prompt(prompt.strip())
+    transcriber = aai.Transcriber()
+    transcript = transcriber.transcribe(audio_path, config=config)
+
+    if transcript.error:
+        return f"Error: {{transcript.error}}"
+
+    return transcript.text or "(no speech detected)"
+
+
+demo = gr.Interface(
+    fn=transcribe,
+    inputs=[
+        gr.Audio(type="filepath", label="Upload or record audio"),
+        gr.Textbox(
+            label="Prompt",
+            placeholder="Optional: guide transcription (e.g. 'Transcribe verbatim.')",
+            value="{prompt_default}",
+        ),
+    ],
+    outputs=gr.Markdown(label="Result"),
+    title="{title}",
+    description="{description}",
+    flagging_mode="never",
+)
+
+if __name__ == "__main__":
+    demo.launch()

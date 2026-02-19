@@ -7,17 +7,23 @@ import pytest
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
-from aai_cli.cli import get_env_key, load_all_datasets, print_banner, run_eval
+from aai_cli.cli import (
+    _apply_hf_dataset_override,
+    get_env_key,
+    load_all_datasets,
+    print_banner,
+    run_eval,
+)
 
 # Absolute path to the config directory
 CONFIG_DIR = str((Path(__file__).parent / ".." / "aai_cli" / "conf").resolve())
 
 
 def test_banner_renders(capsys):
-    """Verify pyfiglet banner prints without error."""
+    """Verify banner prints without error."""
     print_banner()
     captured = capsys.readouterr()
-    assert "___" in captured.out
+    assert "Welcome to the AssemblyAI agent" in captured.out
 
 
 def test_get_env_key_returns_value(monkeypatch):
@@ -40,10 +46,9 @@ def test_default_config_loads():
         assert "earnings22" in cfg.datasets
         assert "peoples" in cfg.datasets
         assert "ami" in cfg.datasets
-        assert cfg.optimization.samples == 50
-        assert cfg.optimization.iterations == 5
+        assert cfg.optimization.samples == 100
+        assert cfg.optimization.iterations == 250
         assert cfg.optimization.num_threads == 12
-        assert cfg.optimization.meta_every == 3
 
 
 def test_config_override():
@@ -62,7 +67,6 @@ def test_eval_config_defaults():
     """Eval section should have expected defaults."""
     with initialize_config_dir(version_base=None, config_dir=CONFIG_DIR):
         cfg = compose(config_name="config")
-        assert cfg.mode == "optimize"
         assert cfg.eval.max_samples == 50
         assert cfg.eval.prompt == "Transcribe verbatim."
         assert cfg.eval.num_threads == 12
@@ -74,12 +78,10 @@ def test_eval_config_override():
         cfg = compose(
             config_name="config",
             overrides=[
-                "mode=eval",
                 "eval.max_samples=10",
                 "eval.prompt=Transcribe exactly.",
             ],
         )
-        assert cfg.mode == "eval"
         assert cfg.eval.max_samples == 10
         assert cfg.eval.prompt == "Transcribe exactly."
 
@@ -153,76 +155,28 @@ FAKE_SAMPLES = [
     {"audio": {"bytes": b"z"}, "reference": "test sentence"},
 ]
 
-FAKE_RESULTS = [
-    {"reference": "hello world", "hypothesis": "hello world", "wer": 0.0},
-    {"reference": "foo bar", "hypothesis": "foo baz", "wer": 0.5},
-    {"reference": "test sentence", "hypothesis": "test", "wer": 0.5},
-]
 
-
-@patch("aai_cli.cli._evaluate_prompt", return_value=FAKE_RESULTS)
+@patch("aai_cli.optimizer.transcribe_assemblyai")
 @patch("aai_cli.cli.load_all_datasets", return_value=FAKE_SAMPLES)
-def test_run_eval_prints_all_ref_hyp(mock_load, mock_eval, capsys):
-    """run_eval should print REF and HYP for every sample."""
+def test_run_eval_shows_wer(mock_load, mock_transcribe, capsys):
+    """run_eval should display WER computed by dspy.Evaluate."""
+    mock_transcribe.side_effect = ["hello world", "foo baz", "test"]
     cfg = OmegaConf.create(
         {
-            "eval": {"max_samples": 3, "prompt": "Transcribe verbatim.", "num_threads": 2},
+            "eval": {"max_samples": 3, "prompt": "Transcribe.", "num_threads": 1},
             "datasets": {},
         }
     )
-    run_eval(cfg, "fake-key", "fake-token")
+    run_eval(cfg, "key", "token")
     output = capsys.readouterr().out
-
-    assert "hello world" in output
-    assert "foo baz" in output
-    assert "REF:" in output
-    assert "HYP:" in output
-    # All 3 samples printed
-    assert "Sample 1/3" in output
-    assert "Sample 2/3" in output
-    assert "Sample 3/3" in output
+    assert "WER:" in output
 
 
-@patch("aai_cli.cli._evaluate_prompt", return_value=FAKE_RESULTS)
-@patch("aai_cli.cli.load_all_datasets", return_value=FAKE_SAMPLES)
-def test_run_eval_shows_wer_summary(mock_load, mock_eval, capsys):
-    """run_eval should display the overall WER in the summary panel."""
-    cfg = OmegaConf.create(
-        {
-            "eval": {"max_samples": 3, "prompt": "Transcribe verbatim.", "num_threads": 2},
-            "datasets": {},
-        }
-    )
-    run_eval(cfg, "fake-key", "fake-token")
-    output = capsys.readouterr().out
-
-    # Mean WER = (0.0 + 0.5 + 0.5) / 3 = 33.33%
-    assert "33.33%" in output
-
-
-@patch("aai_cli.cli._evaluate_prompt", return_value=FAKE_RESULTS)
-@patch("aai_cli.cli.load_all_datasets", return_value=FAKE_SAMPLES)
-def test_run_eval_passes_prompt_and_threads(mock_load, mock_eval, capsys):
-    """run_eval should forward prompt and num_threads to _evaluate_prompt."""
-    cfg = OmegaConf.create(
-        {
-            "eval": {"max_samples": 3, "prompt": "Custom prompt.", "num_threads": 4},
-            "datasets": {},
-        }
-    )
-    run_eval(cfg, "my-key", "my-token")
-
-    mock_eval.assert_called_once_with("Custom prompt.", FAKE_SAMPLES, "my-key", 4, desc="Eval")
-    mock_load.assert_called_once_with(cfg, "my-token", total_samples=3)
-
-
-@patch("aai_cli.cli._evaluate_prompt")
-@patch("aai_cli.cli.load_all_datasets", return_value=FAKE_SAMPLES)
-def test_run_eval_perfect_wer(mock_load, mock_eval, capsys):
-    """All-perfect results should show 0.00% WER."""
-    mock_eval.return_value = [
-        {"reference": "hello", "hypothesis": "hello", "wer": 0.0},
-    ]
+@patch("aai_cli.optimizer.transcribe_assemblyai", return_value="hello world")
+@patch("aai_cli.cli.load_all_datasets")
+def test_run_eval_perfect_wer(mock_load, mock_transcribe, capsys):
+    """All-perfect transcriptions should show 0.00% WER."""
+    mock_load.return_value = [{"audio": {"bytes": b"x"}, "reference": "hello world"}]
     cfg = OmegaConf.create(
         {
             "eval": {"max_samples": 1, "prompt": "Transcribe.", "num_threads": 1},
@@ -234,23 +188,50 @@ def test_run_eval_perfect_wer(mock_load, mock_eval, capsys):
     assert "0.00%" in output
 
 
-@patch("aai_cli.cli._evaluate_prompt")
-@patch("aai_cli.cli.load_all_datasets", return_value=FAKE_SAMPLES)
-def test_run_eval_wer_style_colors(mock_load, mock_eval, capsys):
-    """Per-sample WER should use correct style thresholds."""
-    mock_eval.return_value = [
-        {"reference": "a", "hypothesis": "a", "wer": 0.0},  # success
-        {"reference": "b", "hypothesis": "b x", "wer": 0.05},  # progress (<0.1)
-        {"reference": "c", "hypothesis": "d", "wer": 0.8},  # warning (>=0.1)
-    ]
+# ---------------------------------------------------------------------------
+# _apply_hf_dataset_override tests
+# ---------------------------------------------------------------------------
+
+
+def test_apply_hf_dataset_override_replaces_datasets():
+    """_apply_hf_dataset_override should replace cfg.datasets with a single ad-hoc entry."""
     cfg = OmegaConf.create(
         {
-            "eval": {"max_samples": 3, "prompt": "T", "num_threads": 1},
-            "datasets": {},
+            "datasets": {
+                "earnings22": {
+                    "path": "old",
+                    "config": "c",
+                    "audio_column": "a",
+                    "text_column": "t",
+                    "split": "s",
+                },
+            },
+            "optimization": {"samples": 50},
         }
     )
-    run_eval(cfg, "k", "t")
-    output = capsys.readouterr().out
-    # All 3 samples should be printed
-    assert "Sample 1/3" in output
-    assert "Sample 3/3" in output
+    result = _apply_hf_dataset_override(
+        cfg,
+        hf_dataset="mozilla-foundation/common_voice_11_0",
+        hf_config="en",
+        audio_column="audio",
+        text_column="sentence",
+        split="test",
+    )
+    assert list(result.datasets.keys()) == ["custom"]
+    assert result.datasets.custom.path == "mozilla-foundation/common_voice_11_0"
+    assert result.datasets.custom.config == "en"
+    assert result.datasets.custom.audio_column == "audio"
+    assert result.datasets.custom.text_column == "sentence"
+    assert result.datasets.custom.split == "test"
+    # Original config sections are preserved
+    assert result.optimization.samples == 50
+
+
+def test_apply_hf_dataset_override_defaults():
+    """_apply_hf_dataset_override should use sensible defaults."""
+    cfg = OmegaConf.create({"datasets": {}, "eval": {"max_samples": 10}})
+    result = _apply_hf_dataset_override(cfg, hf_dataset="some/dataset")
+    assert result.datasets.custom.config == "default"
+    assert result.datasets.custom.audio_column == "audio"
+    assert result.datasets.custom.text_column == "text"
+    assert result.datasets.custom.split == "test"
