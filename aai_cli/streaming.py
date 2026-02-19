@@ -112,11 +112,12 @@ def transcribe_streaming(
 
         t0 = time.monotonic()
 
-        # Stream in ~100ms chunks (3200 bytes at 16kHz/16-bit)
+        # Stream in ~100ms chunks (3200 bytes at 16kHz/16-bit) with 20ms
+        # inter-chunk delay (matches stt-benchmark methodology).
         chunk_size = 3200
         for i in range(0, len(pcm_bytes), chunk_size):
             client.stream(pcm_bytes[i : i + chunk_size])
-            time.sleep(0.1)
+            time.sleep(0.02)
 
         client.disconnect(terminate=True)
         done.wait(timeout=30)
