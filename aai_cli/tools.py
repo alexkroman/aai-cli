@@ -332,14 +332,15 @@ def create_voice_agent(
     title: str = "AssemblyAI Voice Agent",
     description: str = "Talk to an AI assistant powered by AssemblyAI, Claude, and Rime.",
     system_prompt: str = "You are a helpful voice assistant. Keep responses brief - 1-2 sentences.",
-    rime_speaker: str = "celeste",
-    rime_model: str = "arcana",
+    rime_speaker: str = "cove",
+    rime_model: str = "mistv2",
     output_path: str = "voice_agent.py",
 ) -> str:
-    """Build a real-time voice agent app (FastAPI + WebSocket) and write it to disk.
+    """Build a real-time voice agent app using Pipecat and write it to disk.
 
     Generates a complete Python file that runs a conversational voice agent pipeline:
-    browser mic → AssemblyAI streaming STT → Claude LLM → Rime TTS → audio playback.
+    AssemblyAI streaming STT → Claude LLM → Rime TTS, orchestrated by Pipecat.
+    Supports WebRTC (local browser) and Twilio transports out of the box.
 
     Use this tool when the user asks to:
     - Build a voice agent, voice assistant, or conversational AI
@@ -350,11 +351,11 @@ def create_voice_agent(
     After generating the app, you can further customize the written file if needed.
 
     Args:
-        title: Title shown in the browser tab and page header.
-        description: Subtitle shown below the title.
+        title: Title used in the module docstring.
+        description: Description used in the module docstring.
         system_prompt: System prompt for the Claude LLM that controls assistant personality.
-        rime_speaker: Rime TTS voice to use (default: "celeste").
-        rime_model: Rime TTS model to use (default: "arcana").
+        rime_speaker: Rime TTS voice to use (default: "cove").
+        rime_model: Rime TTS model to use (default: "mistv2").
         output_path: File path to write the app to (default: "voice_agent.py").
     """
     template = _VOICE_AGENT_TEMPLATE_PATH.read_text()
@@ -371,14 +372,20 @@ def create_voice_agent(
     out.write_text(app_code)
 
     req_path = out.parent / "requirements.txt"
-    req_path.write_text("assemblyai>=0.30\nanthropic>=0.40\nfastapi\nuvicorn[standard]\n")
+    req_path.write_text(
+        "pipecat-ai[assemblyai,anthropic,rime,silero,webrtc]\n"
+        "pipecat-ai-small-webrtc-prebuilt\n"
+        "python-dotenv\n"
+    )
 
     return (
         f"Wrote voice agent to {out}\n"
         f"Wrote {req_path}\n\n"
         f"Run it with:\n"
         f"  pip install -r requirements.txt\n"
-        f"  ASSEMBLYAI_API_KEY=... ANTHROPIC_API_KEY=... RIME_API_KEY=... python {output_path}"
+        f"  python {output_path} --transport webrtc\n\n"
+        f"Set env vars: ASSEMBLYAI_API_KEY, ANTHROPIC_API_KEY, RIME_API_KEY\n"
+        f"(or add them to a .env file)"
     )
 
 

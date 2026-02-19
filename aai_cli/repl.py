@@ -43,7 +43,7 @@ def _cmd_ideas(console: Console) -> None:
     console.print(
         Markdown(
             "## Build\n"
-            "- A voice agent with Pipecat or LiveKit\n"
+            "- Create a simple voice agent\n"
             "- An action item extractor from meeting recordings\n"
             "- A podcast chapter generator from audio files\n"
             "- A sentiment analysis pipeline for customer calls\n"
