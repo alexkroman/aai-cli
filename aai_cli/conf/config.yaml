@@ -59,6 +59,12 @@ datasets:
     audio_column: audio
     text_column: text
     split: test
+  atc:
+    path: jacktol/ATC-ASR-Dataset
+    config: default
+    audio_column: audio
+    text_column: text
+    split: test
 
 optimization:
   samples: 1000

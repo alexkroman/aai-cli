@@ -49,6 +49,7 @@ def test_default_config_loads():
     assert "commonvoice" in cfg.datasets
     assert "librispeech" in cfg.datasets
     assert "librispeech-other" in cfg.datasets
+    assert "atc" in cfg.datasets
     assert cfg.optimization.samples == 1000
     assert cfg.optimization.iterations == 50
     assert cfg.optimization.num_threads == 12
