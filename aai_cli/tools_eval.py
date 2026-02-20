@@ -85,10 +85,8 @@ def optimize_prompt(
     starting_prompt: str,
     iterations: int = 5,
     samples: int = 50,
-    candidates_per_step: int = 1,
     num_threads: int = 12,
     llm_model: str = "",
-    laser: bool = False,
     dataset: str = "all",
     hf_dataset: str = "",
     hf_config: str = "default",
@@ -96,11 +94,12 @@ def optimize_prompt(
     text_column: str = "text",
     split: str = "test",
 ) -> str:
-    """Optimize an AssemblyAI transcription prompt using OPRO (LLM-guided optimization).
+    """Optimize an AssemblyAI transcription prompt using GEPA with LASER feedback.
 
-    Iteratively proposes improved transcription prompts by analyzing transcription
-    errors and using an LLM to suggest fixes. Each iteration: generates candidate
-    prompts, evaluates them against audio datasets, and keeps the best.
+    Iteratively proposes improved transcription prompts by reflecting on
+    transcription errors (major, minor, no-penalty) and using an LLM to
+    suggest fixes. Each iteration: evaluates candidates against audio datasets,
+    reflects on failures, and proposes better prompts.
 
     This is long-running — use fewer iterations/samples for quick experiments.
 
@@ -110,10 +109,8 @@ def optimize_prompt(
         starting_prompt: The seed prompt to begin optimizing from.
         iterations: Number of optimization rounds (default: 5).
         samples: Total audio samples to evaluate per candidate (default: 50, minimum: 5, 50+ recommended).
-        candidates_per_step: Number of candidate prompts generated per iteration (default: 1).
         num_threads: Parallel transcription threads (default: 12).
         llm_model: Model used to generate candidate prompts. Leave empty to use config default.
-        laser: Optimize using LASER metric instead of WER (default: False).
         dataset: Preconfigured dataset shortcut. One of "earnings22", "peoples", "ami", "loquacious", "gigaspeech", "tedlium", "commonvoice", "librispeech", "librispeech-other", or "all" (default). Ignored when hf_dataset is set.
         hf_dataset: Any HF audio dataset path (e.g. "mozilla-foundation/common_voice_11_0"). Overrides dataset.
         hf_config: HF dataset config/subset name (default: "default").
@@ -126,8 +123,6 @@ def optimize_prompt(
         return "Error: samples must be at least 5 (50+ recommended for reliable results)."
     if iterations < 1:
         return "Error: iterations must be at least 1."
-    if candidates_per_step < 1:
-        return "Error: candidates_per_step must be at least 1."
     if not starting_prompt.strip():
         return "Error: starting_prompt cannot be empty."
 
@@ -150,7 +145,6 @@ def optimize_prompt(
         starting_prompt=starting_prompt,
         iterations=iterations,
         samples=samples,
-        candidates_per_step=candidates_per_step,
         num_threads=num_threads,
         llm_model=llm_model or None,
     )
@@ -165,10 +159,8 @@ def optimize_prompt(
         starting_prompt=cfg.optimization.starting_prompt,
         iterations=cfg.optimization.iterations,
         console=console,
-        candidates_per_step=cfg.optimization.candidates_per_step,
         llm_model=cfg.optimization.llm_model,
         num_threads=cfg.optimization.num_threads,
-        laser=laser,
     )
 
     lines = [get_output()]

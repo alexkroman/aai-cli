@@ -77,7 +77,6 @@ optimization:
   iterations: 250
   starting_prompt: >-
     Transcribe verbatim.
-  candidates_per_step: 1
   num_threads: 12
   llm_model: claude-sonnet-4-6
 ```

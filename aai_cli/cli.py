@@ -25,9 +25,14 @@ def optimize_cmd(
     samples: int | None = typer.Option(None, help="Total audio samples"),
     iterations: int | None = typer.Option(None, help="Optimization rounds"),
     starting_prompt: str | None = typer.Option(None, help="Seed prompt"),
-    candidates_per_step: int | None = typer.Option(None, help="Candidates per iteration"),
     num_threads: int | None = typer.Option(None, help="Parallel threads"),
     llm_model: str | None = typer.Option(None, help="LLM for candidate generation"),
+    reflection_model: str | None = typer.Option(
+        None, "--reflection-model", help="LLM for GEPA reflection (defaults to --llm-model)"
+    ),
+    auto: str | None = typer.Option(
+        None, "--auto", help="GEPA budget preset: light, medium, heavy (overrides --iterations)"
+    ),
     output: str | None = typer.Option(None, help="Output JSON path"),
     dataset: str | None = typer.Option(None, help="Dataset name or 'all'"),
     hf_dataset: str | None = typer.Option(
@@ -38,9 +43,8 @@ def optimize_cmd(
     text_column: str | None = typer.Option("text", help="Text/reference column name"),
     split: str | None = typer.Option("test", help="Dataset split"),
     config: Path | None = typer.Option(None, help="Alternate config YAML"),
-    laser: bool = typer.Option(False, "--laser", help="Optimize using LASER metric instead of WER"),
 ):
-    """Run DSPy optimization."""
+    """Run GEPA prompt optimization with LASER feedback."""
     _validate_dataset_args(hf_dataset, dataset)
     ds_opts = DatasetOptions(
         hf_dataset=hf_dataset,
@@ -57,7 +61,6 @@ def optimize_cmd(
         samples=samples,
         iterations=iterations,
         starting_prompt=starting_prompt,
-        candidates_per_step=candidates_per_step,
         num_threads=num_threads,
         llm_model=llm_model,
     )
@@ -73,10 +76,10 @@ def optimize_cmd(
         starting_prompt=cfg.optimization.starting_prompt,
         iterations=cfg.optimization.iterations,
         console=default_console,
-        candidates_per_step=cfg.optimization.candidates_per_step,
         llm_model=cfg.optimization.llm_model,
+        reflection_model=reflection_model,
         num_threads=cfg.optimization.num_threads,
-        laser=laser,
+        auto=auto,
     )
 
     result.datasets = list(cfg.datasets.keys())

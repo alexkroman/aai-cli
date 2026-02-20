@@ -21,12 +21,6 @@ def test_optimize_prompt_zero_iterations():
     assert "at least 1" in result
 
 
-def test_optimize_prompt_zero_candidates():
-    result = optimize_prompt("Transcribe.", candidates_per_step=0)
-    assert "Error" in result
-    assert "at least 1" in result
-
-
 def test_optimize_prompt_empty_prompt():
     result = optimize_prompt("   ")
     assert "Error" in result
@@ -73,7 +67,6 @@ def test_optimize_prompt_calls_run_optimization(mock_setup, mock_load, mock_run)
             "optimization": {
                 "starting_prompt": "Transcribe.",
                 "iterations": 1,
-                "candidates_per_step": 1,
                 "llm_model": "claude-sonnet-4-6",
                 "num_threads": 1,
             }
@@ -83,11 +76,11 @@ def test_optimize_prompt_calls_run_optimization(mock_setup, mock_load, mock_run)
     mock_run.return_value = OptimizationResult(
         best_prompt="optimized",
         best_score=0.95,
-        metric="WER",
+        metric="LASER",
         starting_prompt="Transcribe.",
         model="assemblyai/universal-3-pro",
         total_eval_samples=5,
-        optimizer="DSPy-MIPROv2",
+        optimizer="DSPy-GEPA",
         num_trials=5,
         llm_model="claude-sonnet-4-6",
         timestamp="2024-01-01",
