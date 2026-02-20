@@ -1,11 +1,13 @@
 """Prompt optimization for ASR using DSPy MIPROv2."""
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import dspy
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.progress import Progress
 
 from .eval import compute_laser_score, compute_wer
 from .transcribe import TranscriptionError, set_api_key, transcribe
@@ -137,9 +139,18 @@ def run_optimization(
 
     best_prompt = optimized.predict.signature.instructions
 
-    # Final evaluation pass
-    console.print(Markdown("**Running final evaluation...**"))
-    scores = [metric(ex, optimized(audio_id=ex.audio_id)) for ex in trainset]
+    # Final evaluation pass (threaded to match MIPROv2 parallelism)
+    def _eval_one(ex: dspy.Example) -> float:
+        return metric(ex, optimized(audio_id=ex.audio_id))
+
+    scores: list[float] = []
+    with Progress(console=console) as progress:
+        task = progress.add_task("Running final evaluation...", total=len(trainset))
+        with ThreadPoolExecutor(max_workers=num_threads) as pool:
+            futures = {pool.submit(_eval_one, ex): ex for ex in trainset}
+            for future in as_completed(futures):
+                scores.append(future.result())
+                progress.advance(task)
     avg_score = sum(scores) / len(scores) if scores else 0.0
     if laser:
         # LASER: score is 0-1 (higher=better), display as error rate
