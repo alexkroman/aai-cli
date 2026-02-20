@@ -41,6 +41,7 @@ outputs/
 
 # Claude Code
 .claude/
+CLAUDE.md
 
 # Logs
 *.log

@@ -1,24 +1,17 @@
 """Prompt optimization for ASR using DSPy MIPROv2."""
 
-import json
 import logging
-import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 import dspy
 from rich.console import Console
 from rich.markdown import Markdown
 
 from .eval import compute_laser_score, compute_wer
-from .streaming import is_streaming_model, transcribe_streaming
-from .transcribe import transcribe_assemblyai
+from .transcribe import TranscriptionError, set_api_key, transcribe
+from .types import AudioData, AudioSample, OptimizationResult
 
 logging.getLogger("dspy").setLevel(logging.WARNING)
-
-# Side-channel for audio data so DSPy never serializes it to the LLM.
-_audio_store: dict[int, dict] = {}
-_latency_store: dict[int, float] = {}  # audio_id -> seconds
 
 
 class Transcribe(dspy.Signature):
@@ -32,53 +25,58 @@ class ASRModule(dspy.Module):
     """Wrapper that routes DSPy instruction optimization to AssemblyAI."""
 
     def __init__(
-        self, api_key: str, speech_model: str = "universal-3-pro", api_host: str | None = None
+        self,
+        api_key: str,
+        audio_store: dict[int, AudioData],
+        speech_model: str = "universal-3-pro",
+        api_host: str | None = None,
+        console: Console | None = None,
     ):
         super().__init__()
         self.predict = dspy.Predict(Transcribe)
         self.api_key = api_key
         self.speech_model = speech_model
         self.api_host = api_host
+        self._audio_store = audio_store
+        self._last_prompt: str | None = None
+        self._console = console
 
-    _last_prompt = None
-    _console = None
-
-    def forward(self, audio_id):
+    def forward(self, audio_id: int) -> dspy.Prediction:
         prompt = self.predict.signature.instructions
-        if prompt != ASRModule._last_prompt:
-            ASRModule._last_prompt = prompt
-            if ASRModule._console:
-                ASRModule._console.print(f"[dim]Prompt: {prompt}[/dim]")
+        if prompt != self._last_prompt:
+            self._last_prompt = prompt
+            if self._console:
+                self._console.print(f"[dim]Prompt: {prompt}[/dim]")
         aid = int(audio_id)
-        audio = _audio_store[aid]
-        t0 = time.monotonic()
-        if is_streaming_model(self.speech_model):
-            result = transcribe_streaming(
+        audio = self._audio_store[aid]
+        try:
+            result = transcribe(
                 audio, prompt, self.api_key, speech_model=self.speech_model, api_host=self.api_host
             )
-        else:
-            result = transcribe_assemblyai(audio, prompt, self.api_key)
-        _latency_store[aid] = time.monotonic() - t0
-        return dspy.Prediction(transcription=result["text"])
+            return dspy.Prediction(transcription=result.text)
+        except TranscriptionError as e:
+            if self._console:
+                self._console.print(f"[red]Transcription error: {e}[/red]")
+            return dspy.Prediction(transcription="")
 
 
-def wer_metric(example, pred, trace=None):
+def wer_metric(example: object, pred: object, trace: object = None) -> float:
     """DSPy metric: higher is better, so return 1 - WER."""
     ref = getattr(example, "reference", "") or ""
     hyp = getattr(pred, "transcription", "") or ""
     return max(0.0, 1.0 - compute_wer(ref, hyp))
 
 
-def laser_metric(example, pred, trace=None):
+def laser_metric(example: object, pred: object, trace: object = None) -> float:
     """DSPy metric: LASER score (0-1, higher is better)."""
     ref = getattr(example, "reference", "") or ""
     hyp = getattr(pred, "transcription", "") or ""
     result = compute_laser_score(ref, hyp)
-    return result["laser_score"]
+    return result.laser_score
 
 
 def run_optimization(
-    eval_samples: list[dict],
+    eval_samples: list[AudioSample],
     api_key: str,
     starting_prompt: str,
     iterations: int,
@@ -86,10 +84,9 @@ def run_optimization(
     candidates_per_step: int = 8,
     llm_model: str = "claude-sonnet-4-6",
     num_threads: int = 12,
-    output_path: str | None = None,
     laser: bool = False,
-    **_kwargs,
-) -> dict:
+    **_kwargs: object,
+) -> OptimizationResult:
     """Run MIPROv2 prompt optimization and return results dict."""
     lm = dspy.LM(f"anthropic/{llm_model}")
     dspy.configure(lm=lm)
@@ -105,16 +102,15 @@ def run_optimization(
         )
     )
 
-    # Populate audio store and build lightweight trainset
-    _audio_store.clear()
+    # Populate audio store and build lightweight trainset.
+    audio_store: dict[int, AudioData] = {}
     trainset = []
     for i, s in enumerate(eval_samples):
-        _audio_store[i] = s["audio"]
-        trainset.append(dspy.Example(audio_id=i, reference=s["reference"]).with_inputs("audio_id"))
+        audio_store[i] = s.audio
+        trainset.append(dspy.Example(audio_id=i, reference=s.reference).with_inputs("audio_id"))
 
-    ASRModule._console = console
-    ASRModule._last_prompt = None
-    student = ASRModule(api_key)
+    set_api_key(api_key)
+    student = ASRModule(api_key, audio_store=audio_store, console=console)
     student.predict.signature = student.predict.signature.with_instructions(starting_prompt)
 
     num_candidates = max(candidates_per_step, 5)
@@ -154,22 +150,15 @@ def run_optimization(
         best_wer = 1.0 - avg_score
         console.print(Markdown(f"**Best WER: {best_wer * 100:.2f}%**"))
 
-    result = {
-        "best_prompt": best_prompt,
-        "best_score": avg_score,
-        "metric": metric_name,
-        "starting_prompt": starting_prompt,
-        "model": "assemblyai/universal-3-pro",
-        "total_eval_samples": len(eval_samples),
-        "optimizer": "DSPy-MIPROv2",
-        "num_trials": num_trials,
-        "llm_model": llm_model,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-
-    if output_path:
-        p = Path(output_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(result, indent=2))
-
-    return result
+    return OptimizationResult(
+        best_prompt=best_prompt,
+        best_score=avg_score,
+        metric=metric_name,
+        starting_prompt=starting_prompt,
+        model="assemblyai/universal-3-pro",
+        total_eval_samples=len(eval_samples),
+        optimizer="DSPy-MIPROv2",
+        num_trials=num_trials,
+        llm_model=llm_model,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )

@@ -4,12 +4,9 @@ Streaming models (e.g. u3-pro) use a real-time WebSocket connection,
 unlike the batch API models (e.g. universal-3-pro) in transcribe.py.
 """
 
-import io
 import threading
 import time
 
-import numpy as np
-import soundfile as sf
 from assemblyai.streaming.v3 import (
     Encoding,
     SpeechModel,
@@ -19,7 +16,9 @@ from assemblyai.streaming.v3 import (
     StreamingParameters,
 )
 
-from .audio import prepare_wav_bytes
+from .audio import to_pcm_s16le
+from .transcribe import TranscriptionError
+from .types import AudioData, TranscriptionResult
 
 # Streaming models use the v3 WebSocket client, not the batch API.
 STREAMING_SPEECH_MODELS = frozenset(
@@ -41,36 +40,35 @@ def is_streaming_model(speech_model: str) -> bool:
     return speech_model in STREAMING_SPEECH_MODELS
 
 
-def _audio_to_pcm_s16le(audio, target_sr: int = TARGET_SAMPLE_RATE) -> bytes:
-    """Convert audio input to raw PCM s16le bytes at the target sample rate."""
-    wav_bytes = prepare_wav_bytes(audio)
-    data, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
-    if data.ndim > 1:
-        data = data.mean(axis=1)
-    if sr != target_sr:
-        duration = len(data) / sr
-        num_samples = int(duration * target_sr)
-        indices = np.linspace(0, len(data) - 1, num_samples)
-        data = np.interp(indices, np.arange(len(data)), data)
-    pcm = (data * 32767).astype(np.int16)
-    return pcm.tobytes()
+def _build_streaming_params(
+    speech_model: str, prompt: str, sample_rate: int = TARGET_SAMPLE_RATE
+) -> StreamingParameters:
+    """Build StreamingParameters, adding prompt only for supported models."""
+    params = StreamingParameters(
+        sample_rate=sample_rate,
+        encoding=Encoding.pcm_s16le,
+        speech_model=SpeechModel(speech_model),
+    )
+    if speech_model in PROMPT_SUPPORTED_MODELS and prompt:
+        params.prompt = prompt
+    return params
 
 
 def transcribe_streaming(
-    audio,
+    audio: AudioData,
     prompt: str,
     api_key: str,
     speech_model: str = "u3-pro",
     api_host: str | None = None,
-) -> dict:
+) -> TranscriptionResult:
     """Transcribe audio using the AssemblyAI streaming API.
 
     Uses the v3 WebSocket client. Audio is converted to raw PCM s16le at 16kHz
     and streamed in small chunks to simulate real-time delivery.
 
-    Returns {"text": str, "ttfb": float, "ttfs": float}.
+    Returns TranscriptionResult.
     """
-    pcm_bytes = _audio_to_pcm_s16le(audio)
+    pcm_bytes = to_pcm_s16le(audio, TARGET_SAMPLE_RATE)
 
     transcripts: list[str] = []
     error: list[str] = []
@@ -101,13 +99,7 @@ def transcribe_streaming(
     client.on(StreamingEvents.Termination, on_termination)
 
     try:
-        params = StreamingParameters(
-            sample_rate=TARGET_SAMPLE_RATE,
-            encoding=Encoding.pcm_s16le,
-            speech_model=SpeechModel(speech_model),
-        )
-        if speech_model in PROMPT_SUPPORTED_MODELS and prompt:
-            params.prompt = prompt
+        params = _build_streaming_params(speech_model, prompt)
         client.connect(params)
 
         t0 = time.monotonic()
@@ -120,14 +112,17 @@ def transcribe_streaming(
             time.sleep(0.02)
 
         client.disconnect(terminate=True)
-        done.wait(timeout=30)
+        if not done.wait(timeout=30):
+            raise TranscriptionError("timed out waiting for response")
     except Exception as e:
-        return {"text": f"[streaming transcription error: {e}]", "ttfb": None, "ttfs": None}
+        if isinstance(e, TranscriptionError):
+            raise
+        raise TranscriptionError(str(e)) from e
 
     if error:
-        return {"text": f"[streaming transcription error: {error[0]}]", "ttfb": None, "ttfs": None}
+        raise TranscriptionError(error[0])
 
     ttfs = ttfs_val[-1] - t0 if ttfs_val else None
     ttfb = ttfb_val[0] - t0 if ttfb_val else None
 
-    return {"text": " ".join(transcripts), "ttfb": ttfb, "ttfs": ttfs}
+    return TranscriptionResult(text=" ".join(transcripts), ttfb=ttfb, ttfs=ttfs)
